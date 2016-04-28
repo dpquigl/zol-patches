@@ -1,0 +1,697 @@
+From 9a686fbc186e8e2a64e9a5094d44c7d6fa0ea167 Mon Sep 17 00:00:00 2001
+From: Paul Dagnelie <pcd@delphix.com>
+Date: Sun, 18 Oct 2015 09:53:48 -0700
+Subject: [PATCH] 6328 Fix cstyle errors in zfs codebase Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Reviewed by: Alex Reece <alex@delphix.com>
+ Reviewed by: Richard Elling <Richard.Elling@RichardElling.com> Reviewed by:
+ Jorgen Lundman <lundman@lundman.net> Approved by: Robert Mustacchi
+ <rm@joyent.com>
+
+---
+ cmd/zoneadm/zoneadm.c             | 12 +++++++-----
+ cmd/zoneadmd/vplat.c              |  4 +++-
+ cmd/zpool/zpool_main.c            |  3 ++-
+ usr/src/common/net/wanboot/p12aux.h       |  9 ++++++---
+ usr/src/common/zfs/zfeature_common.c      |  3 ++-
+ usr/src/grub/grub-0.97/stage2/fsys_zfs.c  |  4 ++--
+ lib/libzfs/libzfs_iter.c   |  5 +++--
+ lib/libzfs/libzfs_pool.c   |  5 +++--
+ lib/libzfs/libzfs_util.c   |  5 +++--
+ lib/libzpool/kernel.c      |  4 ++--
+ module/zfs/dmu.c           |  9 +++++----
+ module/zfs/dsl_dataset.c   |  2 +-
+ module/zfs/space_reftree.c |  4 ++--
+ include/sys/zrlock.h    |  9 +++------
+ module/zfs/vdev_label.c    |  6 +++---
+ module/zfs/zap_leaf.c      |  4 ++--
+ module/zfs/zfeature.c      |  6 ++++--
+ module/zfs/zfs_dir.c       |  4 ++--
+ module/zfs/zfs_ioctl.c     |  2 +-
+ module/zfs/zfs_log.c       | 13 +++++++------
+ module/zfs/zfs_replay.c    |  4 ++--
+ module/zfs/zfs_vnops.c     |  6 +++---
+ module/zfs/zio.c           |  6 +++---
+ module/zfs/zio_checksum.c  |  4 ++--
+ module/zfs/zrlock.c        |  8 ++------
+ 25 files changed, 75 insertions(+), 66 deletions(-)
+
+diff --git a/cmd/zoneadm/zoneadm.c b/cmd/zoneadm/zoneadm.c
+index 6d80fcd..21bc924 100644
+--- a/cmd/zoneadm/zoneadm.c
++++ b/cmd/zoneadm/zoneadm.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2014 Nexenta Systems, Inc. All rights reserved.
++ * Copyright (c) 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -3120,7 +3121,7 @@ done:
+ 
+ static void
+ warn_dev_match(zone_dochandle_t s_handle, char *source_zone,
+-	zone_dochandle_t t_handle, char *target_zone)
++    zone_dochandle_t t_handle, char *target_zone)
+ {
+ 	int err;
+ 	struct zone_devtab s_devtab;
+@@ -3242,7 +3243,7 @@ print_fs_warnings(struct zone_fstab *s_fstab, struct zone_fstab *t_fstab)
+ 
+ static void
+ warn_fs_match(zone_dochandle_t s_handle, char *source_zone,
+-	zone_dochandle_t t_handle, char *target_zone)
++    zone_dochandle_t t_handle, char *target_zone)
+ {
+ 	int err;
+ 	struct zone_fstab s_fstab;
+@@ -3286,7 +3287,7 @@ warn_fs_match(zone_dochandle_t s_handle, char *source_zone,
+  */
+ static void
+ warn_ip_match(zone_dochandle_t s_handle, char *source_zone,
+-	zone_dochandle_t t_handle, char *target_zone)
++    zone_dochandle_t t_handle, char *target_zone)
+ {
+ 	int err;
+ 	struct zone_nwiftab s_nwiftab;
+@@ -3341,7 +3342,7 @@ warn_ip_match(zone_dochandle_t s_handle, char *source_zone,
+ 
+ static void
+ warn_dataset_match(zone_dochandle_t s_handle, char *source,
+-	zone_dochandle_t t_handle, char *target)
++    zone_dochandle_t t_handle, char *target)
+ {
+ 	int err;
+ 	struct zone_dstab s_dstab;
+@@ -3505,7 +3506,8 @@ copy_zone(char *src, char *dst)
+ 
+ /* ARGSUSED */
+ int
+-zfm_print(const struct mnttab *p, void *r) {
++zfm_print(const struct mnttab *p, void *r)
++{
+ 	zerror("  %s\n", p->mnt_mountp);
+ 	return (0);
+ }
+diff --git a/cmd/zoneadmd/vplat.c b/cmd/zoneadmd/vplat.c
+index b9954b8..437385e 100644
+--- a/cmd/zoneadmd/vplat.c
++++ b/cmd/zoneadmd/vplat.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2013, Joyent Inc. All rights reserved.
++ * Copyright (c) 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -4292,7 +4293,8 @@ remove_mlps(zlog_t *zlogp, zoneid_t zoneid)
+ }
+ 
+ int
+-prtmount(const struct mnttab *fs, void *x) {
++prtmount(const struct mnttab *fs, void *x)
++{
+ 	zerror((zlog_t *)x, B_FALSE, "  %s", fs->mnt_mountp);
+ 	return (0);
+ }
+diff --git a/cmd/zpool/zpool_main.c b/cmd/zpool/zpool_main.c
+index 982057d..18af5a2 100644
+--- a/cmd/zpool/zpool_main.c
++++ b/cmd/zpool/zpool_main.c
+@@ -192,7 +192,8 @@ static boolean_t log_history = B_TRUE;
+ static uint_t timestamp_fmt = NODATE;
+ 
+ static const char *
+-get_usage(zpool_help_t idx) {
++get_usage(zpool_help_t idx)
++{
+ 	switch (idx) {
+ 	case HELP_ADD:
+ 		return (gettext("\tadd [-fn] <pool> <vdev> ...\n"));
+diff --git a/usr/src/common/net/wanboot/p12aux.h b/usr/src/common/net/wanboot/p12aux.h
+index 76c71c9..be07683 100644
+--- a/usr/src/common/net/wanboot/p12aux.h
++++ b/usr/src/common/net/wanboot/p12aux.h
+@@ -24,11 +24,13 @@
+  * Use is subject to license terms.
+  */
+ 
++/*
++ * Copyright (c) 2015 by Delphix. All rights reserved.
++ */
++
+ #ifndef	_P12AUX_H
+ #define	_P12AUX_H
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ #include <openssl/pkcs12.h>
+ 
+ #ifdef	__cplusplus
+@@ -42,7 +44,8 @@ extern "C" {
+  *
+  * My apologies.
+  */
+-DECLARE_STACK_OF(EVP_PKEY)
++/* LINTED */
++DECLARE_STACK_OF(EVP_PKEY);
+ 
+ #define	sk_EVP_PKEY_new_null() SKM_sk_new_null(EVP_PKEY)
+ #define	sk_EVP_PKEY_free(st) SKM_sk_free(EVP_PKEY, (st))
+diff --git a/usr/src/common/zfs/zfeature_common.c b/usr/src/common/zfs/zfeature_common.c
+index f75894b..a001255 100644
+--- a/usr/src/common/zfs/zfeature_common.c
++++ b/usr/src/common/zfs/zfeature_common.c
+@@ -118,7 +118,8 @@ zfeature_lookup_name(const char *name, spa_feature_t *res)
+ }
+ 
+ boolean_t
+-zfeature_depends_on(spa_feature_t fid, spa_feature_t check) {
++zfeature_depends_on(spa_feature_t fid, spa_feature_t check)
++{
+ 	zfeature_info_t *feature = &spa_feature_table[fid];
+ 
+ 	for (int i = 0; feature->fi_depends[i] != SPA_FEATURE_NONE; i++) {
+diff --git a/usr/src/grub/grub-0.97/stage2/fsys_zfs.c b/usr/src/grub/grub-0.97/stage2/fsys_zfs.c
+index 8c0d137..f9bc6fd 100644
+--- a/usr/src/grub/grub-0.97/stage2/fsys_zfs.c
++++ b/usr/src/grub/grub-0.97/stage2/fsys_zfs.c
+@@ -567,7 +567,7 @@ dmu_read(dnode_phys_t *dn, uint64_t blkid, void *buf, char *stack)
+  */
+ static int
+ mzap_lookup(mzap_phys_t *zapobj, int objsize, const char *name,
+-	uint64_t *value)
++    uint64_t *value)
+ {
+ 	int i, chunks;
+ 	mzap_ent_phys_t *mzap_ent = zapobj->mz_chunk;
+@@ -855,7 +855,7 @@ zap_iterate(dnode_phys_t *zap_dnode, zap_cb_t *cb, void *arg, char *stack)
+  */
+ static int
+ dnode_get(dnode_phys_t *mdn, uint64_t objnum, uint8_t type, dnode_phys_t *buf,
+-	char *stack)
++    char *stack)
+ {
+ 	uint64_t blkid, blksz; /* the block id this object dnode is in */
+ 	int epbs; /* shift of number of dnodes in a block */
+diff --git a/lib/libzfs/libzfs_iter.c b/lib/libzfs/libzfs_iter.c
+index 5fdfe1d..466c897 100644
+--- a/lib/libzfs/libzfs_iter.c
++++ b/lib/libzfs/libzfs_iter.c
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+@@ -308,7 +308,8 @@ typedef struct {
+ } snapspec_arg_t;
+ 
+ static int
+-snapspec_cb(zfs_handle_t *zhp, void *arg) {
++snapspec_cb(zfs_handle_t *zhp, void *arg)
++{
+ 	snapspec_arg_t *ssa = arg;
+ 	char *shortsnapname;
+ 	int err = 0;
+diff --git a/lib/libzfs/libzfs_pool.c b/lib/libzfs/libzfs_pool.c
+index 0cc3ce4..3c99295 100644
+--- a/lib/libzfs/libzfs_pool.c
++++ b/lib/libzfs/libzfs_pool.c
+@@ -22,7 +22,7 @@
+ /*
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+  */
+ 
+@@ -1855,7 +1855,8 @@ zpool_scan(zpool_handle_t *zhp, pool_scan_func_t func)
+  * and the like.
+  */
+ static int
+-ctd_check_path(char *str) {
++ctd_check_path(char *str)
++{
+ 	/*
+ 	 * If it starts with a slash, check the last component.
+ 	 */
+diff --git a/lib/libzfs/libzfs_util.c b/lib/libzfs/libzfs_util.c
+index 507a72c..043816d 100644
+--- a/lib/libzfs/libzfs_util.c
++++ b/lib/libzfs/libzfs_util.c
+@@ -22,7 +22,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+- * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -1518,7 +1518,8 @@ zprop_iter(zprop_func func, void *cb, boolean_t show_all, boolean_t ordered,
+  * and bs are undefined.
+  */
+ int
+-zfs_get_hole_count(const char *path, uint64_t *count, uint64_t *bs) {
++zfs_get_hole_count(const char *path, uint64_t *count, uint64_t *bs)
++{
+ 	int fd, err;
+ 	struct stat64 ss;
+ 	uint64_t fill;
+diff --git a/lib/libzpool/kernel.c b/lib/libzpool/kernel.c
+index a74276e..9b8a354 100644
+--- a/lib/libzpool/kernel.c
++++ b/lib/libzpool/kernel.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc.  All rights reserved.
+  */
+ 
+@@ -500,7 +500,7 @@ vn_openat(char *path, int x1, int flags, int mode, vnode_t **vpp, int x2,
+ /*ARGSUSED*/
+ int
+ vn_rdwr(int uio, vnode_t *vp, void *addr, ssize_t len, offset_t offset,
+-	int x1, int x2, rlim64_t x3, void *x4, ssize_t *residp)
++    int x1, int x2, rlim64_t x3, void *x4, ssize_t *residp)
+ {
+ 	ssize_t iolen, split;
+ 
+diff --git a/module/zfs/dmu.c b/module/zfs/dmu.c
+index 5b24268..ceb08e2 100644
+--- a/module/zfs/dmu.c
++++ b/module/zfs/dmu.c
+@@ -1670,7 +1670,7 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
+ 
+ int
+ dmu_object_set_blocksize(objset_t *os, uint64_t object, uint64_t size, int ibs,
+-	dmu_tx_t *tx)
++    dmu_tx_t *tx)
+ {
+ 	dnode_t *dn;
+ 	int err;
+@@ -1685,7 +1685,7 @@ dmu_object_set_blocksize(objset_t *os, uint64_t object, uint64_t size, int ibs,
+ 
+ void
+ dmu_object_set_checksum(objset_t *os, uint64_t object, uint8_t checksum,
+-	dmu_tx_t *tx)
++    dmu_tx_t *tx)
+ {
+ 	dnode_t *dn;
+ 
+@@ -1705,7 +1705,7 @@ dmu_object_set_checksum(objset_t *os, uint64_t object, uint8_t checksum,
+ 
+ void
+ dmu_object_set_compress(objset_t *os, uint64_t object, uint8_t compress,
+-	dmu_tx_t *tx)
++    dmu_tx_t *tx)
+ {
+ 	dnode_t *dn;
+ 
+@@ -1873,7 +1873,8 @@ dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
+  * ID and wait for that to be synced.
+  */
+ int
+-dmu_object_wait_synced(objset_t *os, uint64_t object) {
++dmu_object_wait_synced(objset_t *os, uint64_t object)
++{
+ 	dnode_t *dn;
+ 	int error, i;
+ 
+diff --git a/module/zfs/dsl_dataset.c b/module/zfs/dsl_dataset.c
+index b06369e..31dc0df 100644
+--- a/module/zfs/dsl_dataset.c
++++ b/module/zfs/dsl_dataset.c
+@@ -3449,7 +3449,7 @@ dsl_dataset_space_wouldfree(dsl_dataset_t *firstsnap,
+  */
+ boolean_t
+ dsl_dataset_is_before(dsl_dataset_t *later, dsl_dataset_t *earlier,
+-	uint64_t earlier_txg)
++    uint64_t earlier_txg)
+ {
+ 	dsl_pool_t *dp = later->ds_dir->dd_pool;
+ 	int error;
+diff --git a/module/zfs/space_reftree.c b/module/zfs/space_reftree.c
+index a508092..3d99059 100644
+--- a/module/zfs/space_reftree.c
++++ b/module/zfs/space_reftree.c
+@@ -23,7 +23,7 @@
+  * Use is subject to license terms.
+  */
+ /*
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  */
+ 
+ #include <sys/zfs_context.h>
+@@ -103,7 +103,7 @@ space_reftree_add_node(avl_tree_t *t, uint64_t offset, int64_t refcnt)
+ 
+ void
+ space_reftree_add_seg(avl_tree_t *t, uint64_t start, uint64_t end,
+-	int64_t refcnt)
++    int64_t refcnt)
+ {
+ 	space_reftree_add_node(t, start, refcnt);
+ 	space_reftree_add_node(t, end, -refcnt);
+diff --git a/include/sys/zrlock.h b/include/sys/zrlock.h
+index dcd63f7..b6eba1a 100644
+--- a/include/sys/zrlock.h
++++ b/include/sys/zrlock.h
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015 by Delphix. All rights reserved.
+  */
+ 
+ #ifndef	_SYS_ZRLOCK_H
+@@ -44,12 +45,8 @@ typedef struct zrlock {
+ 
+ extern void zrl_init(zrlock_t *);
+ extern void zrl_destroy(zrlock_t *);
+-#ifdef	ZFS_DEBUG
+-#define	zrl_add(_z)	zrl_add_debug((_z), __func__)
+-extern void zrl_add_debug(zrlock_t *, const char *);
+-#else
+-extern void zrl_add(zrlock_t *);
+-#endif
++#define	zrl_add(_z)	zrl_add_impl((_z), __func__)
++extern void zrl_add_impl(zrlock_t *, const char *);
+ extern void zrl_remove(zrlock_t *);
+ extern int zrl_tryenter(zrlock_t *);
+ extern void zrl_exit(zrlock_t *);
+diff --git a/module/zfs/vdev_label.c b/module/zfs/vdev_label.c
+index 7bbd7f2..c9b0641 100644
+--- a/module/zfs/vdev_label.c
++++ b/module/zfs/vdev_label.c
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -179,7 +179,7 @@ vdev_label_number(uint64_t psize, uint64_t offset)
+ 
+ static void
+ vdev_label_read(zio_t *zio, vdev_t *vd, int l, void *buf, uint64_t offset,
+-	uint64_t size, zio_done_func_t *done, void *private, int flags)
++    uint64_t size, zio_done_func_t *done, void *private, int flags)
+ {
+ 	ASSERT(spa_config_held(zio->io_spa, SCL_STATE_ALL, RW_WRITER) ==
+ 	    SCL_STATE_ALL);
+@@ -193,7 +193,7 @@ vdev_label_read(zio_t *zio, vdev_t *vd, int l, void *buf, uint64_t offset,
+ 
+ static void
+ vdev_label_write(zio_t *zio, vdev_t *vd, int l, void *buf, uint64_t offset,
+-	uint64_t size, zio_done_func_t *done, void *private, int flags)
++    uint64_t size, zio_done_func_t *done, void *private, int flags)
+ {
+ 	ASSERT(spa_config_held(zio->io_spa, SCL_ALL, RW_WRITER) == SCL_ALL ||
+ 	    (spa_config_held(zio->io_spa, SCL_CONFIG | SCL_STATE, RW_READER) ==
+diff --git a/module/zfs/zap_leaf.c b/module/zfs/zap_leaf.c
+index 96358f7..c8c3660 100644
+--- a/module/zfs/zap_leaf.c
++++ b/module/zfs/zap_leaf.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -535,7 +535,7 @@ zap_entry_read_name(zap_t *zap, const zap_entry_handle_t *zeh, uint16_t buflen,
+ 
+ int
+ zap_entry_update(zap_entry_handle_t *zeh,
+-	uint8_t integer_size, uint64_t num_integers, const void *buf)
++    uint8_t integer_size, uint64_t num_integers, const void *buf)
+ {
+ 	int delta_chunks;
+ 	zap_leaf_t *l = zeh->zeh_leaf;
+diff --git a/module/zfs/zfeature.c b/module/zfs/zfeature.c
+index 1833e1e..35ce827 100644
+--- a/module/zfs/zfeature.c
++++ b/module/zfs/zfeature.c
+@@ -269,7 +269,8 @@ feature_get_refcount_from_disk(spa_t *spa, zfeature_info_t *feature,
+ 
+ 
+ static int
+-feature_get_enabled_txg(spa_t *spa, zfeature_info_t *feature, uint64_t *res) {
++feature_get_enabled_txg(spa_t *spa, zfeature_info_t *feature, uint64_t *res)
++{
+ 	uint64_t enabled_txg_obj = spa->spa_feat_enabled_txg_obj;
+ 
+ 	ASSERT(zfeature_depends_on(feature->fi_feature,
+@@ -489,7 +490,8 @@ spa_feature_is_active(spa_t *spa, spa_feature_t fid)
+  * Returns B_FALSE otherwise (i.e. if the feature is not enabled).
+  */
+ boolean_t
+-spa_feature_enabled_txg(spa_t *spa, spa_feature_t fid, uint64_t *txg) {
++spa_feature_enabled_txg(spa_t *spa, spa_feature_t fid, uint64_t *txg)
++{
+ 	int err;
+ 
+ 	ASSERT(VALID_FEATURE_FID(fid));
+diff --git a/module/zfs/zfs_dir.c b/module/zfs/zfs_dir.c
+index bd7424b..c2f876e 100644
+--- a/module/zfs/zfs_dir.c
++++ b/module/zfs/zfs_dir.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  */
+ 
+ #include <sys/types.h>
+@@ -801,7 +801,7 @@ zfs_dropname(zfs_dirlock_t *dl, znode_t *zp, znode_t *dzp, dmu_tx_t *tx,
+  */
+ int
+ zfs_link_destroy(zfs_dirlock_t *dl, znode_t *zp, dmu_tx_t *tx, int flag,
+-	boolean_t *unlinkedp)
++    boolean_t *unlinkedp)
+ {
+ 	znode_t *dzp = dl->dl_dzp;
+ 	zfsvfs_t *zfsvfs = dzp->z_zfsvfs;
+diff --git a/module/zfs/zfs_ioctl.c b/module/zfs/zfs_ioctl.c
+index f813116..c863cbd 100644
+--- a/module/zfs/zfs_ioctl.c
++++ b/module/zfs/zfs_ioctl.c
+@@ -5544,7 +5544,7 @@ zfs_ioctl_register_dataset_read(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func)
+ 
+ static void
+ zfs_ioctl_register_dataset_modify(zfs_ioc_t ioc, zfs_ioc_legacy_func_t *func,
+-	zfs_secpolicy_func_t *secpolicy)
++    zfs_secpolicy_func_t *secpolicy)
+ {
+ 	zfs_ioctl_register_legacy(ioc, func, secpolicy,
+ 	    DATASET_NAME, B_TRUE, POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY);
+diff --git a/module/zfs/zfs_log.c b/module/zfs/zfs_log.c
+index 47d32a4..4fb57e9 100644
+--- a/module/zfs/zfs_log.c
++++ b/module/zfs/zfs_log.c
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015 by Delphix. All rights reserved.
+  */
+ 
+ #include <sys/types.h>
+@@ -343,7 +344,7 @@ zfs_log_create(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
+  */
+ void
+ zfs_log_remove(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
+-	znode_t *dzp, char *name, uint64_t foid)
++    znode_t *dzp, char *name, uint64_t foid)
+ {
+ 	itx_t *itx;
+ 	lr_remove_t *lr;
+@@ -367,7 +368,7 @@ zfs_log_remove(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
+  */
+ void
+ zfs_log_link(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
+-	znode_t *dzp, znode_t *zp, char *name)
++    znode_t *dzp, znode_t *zp, char *name)
+ {
+ 	itx_t *itx;
+ 	lr_link_t *lr;
+@@ -422,7 +423,7 @@ zfs_log_symlink(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
+  */
+ void
+ zfs_log_rename(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
+-	znode_t *sdzp, char *sname, znode_t *tdzp, char *dname, znode_t *szp)
++    znode_t *sdzp, char *sname, znode_t *tdzp, char *dname, znode_t *szp)
+ {
+ 	itx_t *itx;
+ 	lr_rename_t *lr;
+@@ -450,7 +451,7 @@ ssize_t zfs_immediate_write_sz = 32768;
+ 
+ void
+ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+-	znode_t *zp, offset_t off, ssize_t resid, int ioflag)
++    znode_t *zp, offset_t off, ssize_t resid, int ioflag)
+ {
+ 	itx_wr_state_t write_state;
+ 	boolean_t slogging;
+@@ -527,7 +528,7 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+  */
+ void
+ zfs_log_truncate(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+-	znode_t *zp, uint64_t off, uint64_t len)
++    znode_t *zp, uint64_t off, uint64_t len)
+ {
+ 	itx_t *itx;
+ 	lr_truncate_t *lr;
+@@ -550,7 +551,7 @@ zfs_log_truncate(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+  */
+ void
+ zfs_log_setattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
+-	znode_t *zp, vattr_t *vap, uint_t mask_applied, zfs_fuid_info_t *fuidp)
++    znode_t *zp, vattr_t *vap, uint_t mask_applied, zfs_fuid_info_t *fuidp)
+ {
+ 	itx_t		*itx;
+ 	lr_setattr_t	*lr;
+diff --git a/module/zfs/zfs_replay.c b/module/zfs/zfs_replay.c
+index 3f98aae..c422307 100644
+--- a/module/zfs/zfs_replay.c
++++ b/module/zfs/zfs_replay.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  */
+ 
+ #include <sys/types.h>
+@@ -55,7 +55,7 @@
+ 
+ static void
+ zfs_init_vattr(vattr_t *vap, uint64_t mask, uint64_t mode,
+-	uint64_t uid, uint64_t gid, uint64_t rdev, uint64_t nodeid)
++    uint64_t uid, uint64_t gid, uint64_t rdev, uint64_t nodeid)
+ {
+ 	bzero(vap, sizeof (*vap));
+ 	vap->va_mask = (uint_t)mask;
+diff --git a/module/zfs/zfs_vnops.c b/module/zfs/zfs_vnops.c
+index fe740a5..49b1587 100644
+--- a/module/zfs/zfs_vnops.c
++++ b/module/zfs/zfs_vnops.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+@@ -4137,7 +4137,7 @@ top:
+ /* ARGSUSED */
+ static int
+ zfs_null_putapage(vnode_t *vp, page_t *pp, u_offset_t *offp,
+-		size_t *lenp, int flags, cred_t *cr)
++    size_t *lenp, int flags, cred_t *cr)
+ {
+ 	pvn_write_done(pp, B_INVAL|B_FORCE|B_ERROR);
+ 	return (0);
+@@ -4163,7 +4163,7 @@ zfs_null_putapage(vnode_t *vp, page_t *pp, u_offset_t *offp,
+ /* ARGSUSED */
+ static int
+ zfs_putapage(vnode_t *vp, page_t *pp, u_offset_t *offp,
+-		size_t *lenp, int flags, cred_t *cr)
++    size_t *lenp, int flags, cred_t *cr)
+ {
+ 	znode_t		*zp = VTOZ(vp);
+ 	zfsvfs_t	*zfsvfs = zp->z_zfsvfs;
+diff --git a/module/zfs/zio.c b/module/zfs/zio.c
+index 7fa795e..e129247 100644
+--- a/module/zfs/zio.c
++++ b/module/zfs/zio.c
+@@ -267,7 +267,7 @@ zio_data_buf_free(void *buf, size_t size)
+  */
+ static void
+ zio_push_transform(zio_t *zio, void *data, uint64_t size, uint64_t bufsize,
+-	zio_transform_func_t *transform)
++    zio_transform_func_t *transform)
+ {
+ 	zio_transform_t *zt = kmem_alloc(sizeof (zio_transform_t), KM_SLEEP);
+ 
+@@ -994,8 +994,8 @@ zio_vdev_child_io(zio_t *pio, blkptr_t *bp, vdev_t *vd, uint64_t offset,
+ 
+ zio_t *
+ zio_vdev_delegated_io(vdev_t *vd, uint64_t offset, void *data, uint64_t size,
+-	int type, zio_priority_t priority, enum zio_flag flags,
+-	zio_done_func_t *done, void *private)
++    int type, zio_priority_t priority, enum zio_flag flags,
++    zio_done_func_t *done, void *private)
+ {
+ 	zio_t *zio;
+ 
+diff --git a/module/zfs/zio_checksum.c b/module/zfs/zio_checksum.c
+index b471ad9..4bef6a3 100644
+--- a/module/zfs/zio_checksum.c
++++ b/module/zfs/zio_checksum.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+  * Copyright 2013 Saso Kiselkov. All rights reserved.
+  */
+@@ -245,7 +245,7 @@ zio_checksum_template_init(enum zio_checksum checksum, spa_t *spa)
+  */
+ void
+ zio_checksum_compute(zio_t *zio, enum zio_checksum checksum,
+-	void *data, uint64_t size)
++    void *data, uint64_t size)
+ {
+ 	blkptr_t *bp = zio->io_bp;
+ 	uint64_t offset = zio->io_offset;
+diff --git a/module/zfs/zrlock.c b/module/zfs/zrlock.c
+index 2215184..7f6beee 100644
+--- a/module/zfs/zrlock.c
++++ b/module/zfs/zrlock.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014, 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -69,11 +69,7 @@ zrl_destroy(zrlock_t *zrl)
+ }
+ 
+ void
+-#ifdef	ZFS_DEBUG
+-zrl_add_debug(zrlock_t *zrl, const char *zc)
+-#else
+-zrl_add(zrlock_t *zrl)
+-#endif
++zrl_add_impl(zrlock_t *zrl, const char *zc)
+ {
+ 	uint32_t n = (uint32_t)zrl->zr_refcount;
+ 
+-- 
+1.8.3.1
+

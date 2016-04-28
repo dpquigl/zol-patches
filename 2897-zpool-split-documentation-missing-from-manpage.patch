@@ -1,0 +1,77 @@
+From 879bece34ee134b2be670393fe9ffe33ce268aa0 Mon Sep 17 00:00:00 2001
+From: Steven Burgess <sburgess@datto.com>
+Date: Sat, 20 Feb 2016 06:10:45 +0300
+Subject: [PATCH] 2897 "zpool split" documentation missing from manpage
+ Reviewed by: Dan McDonald <danmcd@omniti.com> Reviewed by: Matthew Ahrens
+ <mahrens@delphix.com> Approved by: Hans Rosenfeld
+ <rosenfeld@grumpf.hope-2000.org>
+
+---
+ usr/src/man/man1m/zpool.1m | 44 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/usr/src/man/man1m/zpool.1m b/usr/src/man/man1m/zpool.1m
+index 0b10858..c525623 100644
+--- a/usr/src/man/man1m/zpool.1m
++++ b/usr/src/man/man1m/zpool.1m
+@@ -139,6 +139,12 @@
+ .Ar property Ns = Ns Ar value
+ .Ar pool
+ .Nm
++.Cm split
++.Op Fl n
++.Oo Fl o Ar property Ns = Ns Ar value Oc Ns ...
++.Op Fl R Ar root
++.Ar pool newpool
++.Nm
+ .Cm status
+ .Op Fl Dvx
+ .Op Fl T Sy u Ns | Ns Sy d
+@@ -1327,6 +1333,44 @@ section for more information on what properties can be set and acceptable
+ values.
+ .It Xo
+ .Nm
++.Cm split
++.Op Fl n
++.Oo Fl o Ar property Ns = Ns Ar value Oc Ns ...
++.Op Fl R Ar root
++.Ar pool newpool
++.Xc
++Splits devices off
++.Ar pool
++creating
++.Ar newpool .
++All vdevs in
++.Ar pool
++must be mirrors. At the time of the split,
++.Ar newpool
++will be a replica of
++.Ar pool .
++.Bl -tag -width Ds
++.It Fl n
++Do dry run, do not actually perform the split. Print out the expected
++configuration of
++.Ar newpool .
++.It Fl o Ar property Ns = Ns Ar value
++Sets the specified property for
++.Ar newpool .
++See the
++.Sx Properties
++section for more information on the available pool properties.
++.It Fl R Ar root
++Set
++.Sy altroot
++for
++.Ar newpool
++to
++.Ar root
++and automaticaly import it.
++.El
++.It Xo
++.Nm
+ .Cm status
+ .Op Fl Dvx
+ .Op Fl T Sy u Ns | Ns Sy d
+-- 
+1.8.3.1
+

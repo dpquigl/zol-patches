@@ -1,0 +1,49 @@
+From 971640e6aa954c91b0706543741aa4570299f4d7 Mon Sep 17 00:00:00 2001
+From: ilovezfs <ilovezfs@icloud.com>
+Date: Mon, 25 Jan 2016 23:41:11 -0800
+Subject: [PATCH] 6541 Pool feature-flag check defeated if "verify" is included
+ in the dedup property value Reviewed by: Matthew Ahrens <mahrens@delphix.com>
+ Reviewed by: Richard Laager <rlaager@wiktel.com> Approved by: Robert
+ Mustacchi <rm@joyent.com>
+
+---
+ module/zfs/zfs_ioctl.c    | 2 +-
+ module/zfs/zio_checksum.c | 6 ++++++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/module/zfs/zfs_ioctl.c b/module/zfs/zfs_ioctl.c
+index 43cedca..ae66e42 100644
+--- a/module/zfs/zfs_ioctl.c
++++ b/module/zfs/zfs_ioctl.c
+@@ -3886,7 +3886,7 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
+ 			return (SET_ERROR(EINVAL));
+ 
+ 		/* check prop value is enabled in features */
+-		feature = zio_checksum_to_feature(intval);
++		feature = zio_checksum_to_feature(intval & ZIO_CHECKSUM_MASK);
+ 		if (feature == SPA_FEATURE_NONE)
+ 			break;
+ 
+diff --git a/module/zfs/zio_checksum.c b/module/zfs/zio_checksum.c
+index 4bef6a3..8bd7e02 100644
+--- a/module/zfs/zio_checksum.c
++++ b/module/zfs/zio_checksum.c
+@@ -136,9 +136,15 @@ zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
+ 	    ZCHECKSUM_FLAG_NOPWRITE, "edonr"},
+ };
+ 
++/*
++ * The flag corresponding to the "verify" in dedup=[checksum,]verify
++ * must be cleared first, so callers should use ZIO_CHECKSUM_MASK.
++ */
+ spa_feature_t
+ zio_checksum_to_feature(enum zio_checksum cksum)
+ {
++	VERIFY((cksum & ~ZIO_CHECKSUM_MASK) == 0);
++
+ 	switch (cksum) {
+ 	case ZIO_CHECKSUM_SHA512:
+ 		return (SPA_FEATURE_SHA512);
+-- 
+1.8.3.1
+

@@ -1,0 +1,336 @@
+From 2bcf0248e992f292c7b814458bcdce2f004925d6 Mon Sep 17 00:00:00 2001
+From: Max Grossman <max.grossman@delphix.com>
+Date: Sat, 4 Apr 2015 22:27:46 -0700
+Subject: [PATCH] 5692 expose the number of hole blocks in a file Reviewed by:
+ Adam Leventhal <ahl@delphix.com> Reviewed by: Matthew Ahrens
+ <mahrens@delphix.com> Reviewed by: Boris Protopopov <bprotopopov@hotmail.com>
+ Approved by: Richard Lowe <richlowe@richlowe.net>
+
+---
+ include/libzfs.h      |  4 ++-
+ lib/libzfs/libzfs_util.c | 49 ++++++++++++++++++++++++++++++-
+ lib/libzfs/mapfile-vers  |  1 +
+ module/zfs/dmu.c         | 51 ++++++++++++++++++++++++---------
+ include/sys/dmu.h     |  9 ++++++
+ module/zfs/zfs_vnops.c   | 47 ++++++++++++++++++++++++++++++
+ include/sys/filio.h          | 11 +++++--
+ 7 files changed, 155 insertions(+), 17 deletions(-)
+
+diff --git a/include/libzfs.h b/include/libzfs.h
+index 9aa5ba5..d1c9e00 100644
+--- a/include/libzfs.h
++++ b/include/libzfs.h
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+@@ -764,6 +764,8 @@ extern boolean_t libzfs_fru_compare(libzfs_handle_t *, const char *,
+ extern boolean_t libzfs_fru_notself(libzfs_handle_t *, const char *);
+ extern int zpool_fru_set(zpool_handle_t *, uint64_t, const char *);
+ 
++extern int zfs_get_hole_count(const char *, uint64_t *, uint64_t *);
++
+ #ifdef	__cplusplus
+ }
+ #endif
+diff --git a/lib/libzfs/libzfs_util.c b/lib/libzfs/libzfs_util.c
+index 7652f67..1adea25 100644
+--- a/lib/libzfs/libzfs_util.c
++++ b/lib/libzfs/libzfs_util.c
+@@ -22,7 +22,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+- * Copyright (c) 2012 by Delphix. All rights reserved.
++ * Copyright (c) 2014 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -39,6 +39,7 @@
+ #include <unistd.h>
+ #include <ctype.h>
+ #include <math.h>
++#include <sys/filio.h>
+ #include <sys/mnttab.h>
+ #include <sys/mntent.h>
+ #include <sys/types.h>
+@@ -1499,3 +1500,49 @@ zprop_iter(zprop_func func, void *cb, boolean_t show_all, boolean_t ordered,
+ {
+ 	return (zprop_iter_common(func, cb, show_all, ordered, type));
+ }
++
++/*
++ * zfs_get_hole_count retrieves the number of holes (blocks which are
++ * zero-filled) in the specified file using the _FIO_COUNT_FILLED ioctl. It
++ * also optionally fetches the block size when bs is non-NULL. With hole count
++ * and block size the full space consumed by the holes of a file can be
++ * calculated.
++ *
++ * On success, zero is returned, the count argument is set to the
++ * number of holes, and the bs argument is set to the block size (if it is
++ * not NULL). On error, a non-zero errno is returned and the values in count
++ * and bs are undefined.
++ */
++int
++zfs_get_hole_count(const char *path, uint64_t *count, uint64_t *bs) {
++	int fd, err;
++	struct stat64 ss;
++	uint64_t fill;
++
++	fd = open(path, O_RDONLY | O_LARGEFILE);
++	if (fd == -1)
++		return (errno);
++
++	if (ioctl(fd, _FIO_COUNT_FILLED, &fill) == -1) {
++		err = errno;
++		(void) close(fd);
++		return (err);
++	}
++
++	if (fstat64(fd, &ss) == -1) {
++		err = errno;
++		(void) close(fd);
++		return (err);
++	}
++
++	*count = (ss.st_size + ss.st_blksize - 1) / ss.st_blksize - fill;
++	VERIFY3S(*count, >=, 0);
++	if (bs != NULL) {
++		*bs = ss.st_blksize;
++	}
++
++	if (close(fd) == -1) {
++		return (errno);
++	}
++	return (0);
++}
+diff --git a/lib/libzfs/mapfile-vers b/lib/libzfs/mapfile-vers
+index 65f2669..a911b73 100644
+--- a/lib/libzfs/mapfile-vers
++++ b/lib/libzfs/mapfile-vers
+@@ -75,6 +75,7 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zfs_expand_proplist;
+ 	zfs_get_handle;
+ 	zfs_get_holds;
++	zfs_get_hole_count;
+ 	zfs_get_name;
+ 	zfs_get_pool_handle;
+ 	zfs_get_user_props;
+diff --git a/module/zfs/dmu.c b/module/zfs/dmu.c
+index 6704df0..15a107b 100644
+--- a/module/zfs/dmu.c
++++ b/module/zfs/dmu.c
+@@ -1811,25 +1811,20 @@ int
+ dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
+ {
+ 	dnode_t *dn;
+-	int i, err;
++	int err;
+ 
+-	err = dnode_hold(os, object, FTAG, &dn);
+-	if (err)
+-		return (err);
+ 	/*
+ 	 * Sync any current changes before
+ 	 * we go trundling through the block pointers.
+ 	 */
+-	for (i = 0; i < TXG_SIZE; i++) {
+-		if (list_link_active(&dn->dn_dirty_link[i]))
+-			break;
++	err = dmu_object_wait_synced(os, object);
++	if (err) {
++		return (err);
+ 	}
+-	if (i != TXG_SIZE) {
+-		dnode_rele(dn, FTAG);
+-		txg_wait_synced(dmu_objset_pool(os), 0);
+-		err = dnode_hold(os, object, FTAG, &dn);
+-		if (err)
+-			return (err);
++
++	err = dnode_hold(os, object, FTAG, &dn);
++	if (err) {
++		return (err);
+ 	}
+ 
+ 	err = dnode_next_offset(dn, (hole ? DNODE_FIND_HOLE : 0), off, 1, 1, 0);
+@@ -1838,6 +1833,36 @@ dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
+ 	return (err);
+ }
+ 
++/*
++ * Given the ZFS object, if it contains any dirty nodes
++ * this function flushes all dirty blocks to disk. This
++ * ensures the DMU object info is updated. A more efficient
++ * future version might just find the TXG with the maximum
++ * ID and wait for that to be synced.
++ */
++int
++dmu_object_wait_synced(objset_t *os, uint64_t object) {
++	dnode_t *dn;
++	int error, i;
++
++	error = dnode_hold(os, object, FTAG, &dn);
++	if (error) {
++		return (error);
++	}
++
++	for (i = 0; i < TXG_SIZE; i++) {
++		if (list_link_active(&dn->dn_dirty_link[i])) {
++			break;
++		}
++	}
++	dnode_rele(dn, FTAG);
++	if (i != TXG_SIZE) {
++		txg_wait_synced(dmu_objset_pool(os), 0);
++	}
++
++	return (0);
++}
++
+ void
+ dmu_object_info_from_dnode(dnode_t *dn, dmu_object_info_t *doi)
+ {
+diff --git a/include/sys/dmu.h b/include/sys/dmu.h
+index 6e49ae3..b26061b 100644
+--- a/include/sys/dmu.h
++++ b/include/sys/dmu.h
+@@ -904,6 +904,15 @@ int dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole,
+     uint64_t *off);
+ 
+ /*
++ * Check if a DMU object has any dirty blocks. If so, sync out
++ * all pending transaction groups. Otherwise, this function
++ * does not alter DMU state. This could be improved to only sync
++ * out the necessary transaction groups for this particular
++ * object.
++ */
++int dmu_object_wait_synced(objset_t *os, uint64_t object);
++
++/*
+  * Initial setup and final teardown.
+  */
+ extern void dmu_init(void);
+diff --git a/module/zfs/zfs_vnops.c b/module/zfs/zfs_vnops.c
+index 5060412..bf75097 100644
+--- a/module/zfs/zfs_vnops.c
++++ b/module/zfs/zfs_vnops.c
+@@ -298,24 +298,31 @@ zfs_ioctl(vnode_t *vp, int com, intptr_t data, int flag, cred_t *cred,
+     int *rvalp, caller_context_t *ct)
+ {
+ 	offset_t off;
++	offset_t ndata;
++	dmu_object_info_t doi;
+ 	int error;
+ 	zfsvfs_t *zfsvfs;
+ 	znode_t *zp;
+ 
+ 	switch (com) {
+ 	case _FIOFFS:
++	{
+ 		return (zfs_sync(vp->v_vfsp, 0, cred));
+ 
+ 		/*
+ 		 * The following two ioctls are used by bfu.  Faking out,
+ 		 * necessary to avoid bfu errors.
+ 		 */
++	}
+ 	case _FIOGDIO:
+ 	case _FIOSDIO:
++	{
+ 		return (0);
++	}
+ 
+ 	case _FIO_SEEK_DATA:
+ 	case _FIO_SEEK_HOLE:
++	{
+ 		if (ddi_copyin((void *)data, &off, sizeof (off), flag))
+ 			return (SET_ERROR(EFAULT));
+ 
+@@ -333,6 +340,46 @@ zfs_ioctl(vnode_t *vp, int com, intptr_t data, int flag, cred_t *cred,
+ 			return (SET_ERROR(EFAULT));
+ 		return (0);
+ 	}
++	case _FIO_COUNT_FILLED:
++	{
++		/*
++		 * _FIO_COUNT_FILLED adds a new ioctl command which
++		 * exposes the number of filled blocks in a
++		 * ZFS object.
++		 */
++		zp = VTOZ(vp);
++		zfsvfs = zp->z_zfsvfs;
++		ZFS_ENTER(zfsvfs);
++		ZFS_VERIFY_ZP(zp);
++
++		/*
++		 * Wait for all dirty blocks for this object
++		 * to get synced out to disk, and the DMU info
++		 * updated.
++		 */
++		error = dmu_object_wait_synced(zfsvfs->z_os, zp->z_id);
++		if (error) {
++			ZFS_EXIT(zfsvfs);
++			return (error);
++		}
++
++		/*
++		 * Retrieve fill count from DMU object.
++		 */
++		error = dmu_object_info(zfsvfs->z_os, zp->z_id, &doi);
++		if (error) {
++			ZFS_EXIT(zfsvfs);
++			return (error);
++		}
++
++		ndata = doi.doi_fill_count;
++
++		ZFS_EXIT(zfsvfs);
++		if (ddi_copyout(&ndata, (void *)data, sizeof (ndata), flag))
++			return (SET_ERROR(EFAULT));
++		return (0);
++	}
++	}
+ 	return (SET_ERROR(ENOTTY));
+ }
+ 
+diff --git a/include/sys/filio.h b/include/sys/filio.h
+index cbd98af..7815aff 100644
+--- a/include/sys/filio.h
++++ b/include/sys/filio.h
+@@ -36,11 +36,13 @@
+  * contributors.
+  */
+ 
++/*
++ * Copyright (c) 2013 by Delphix. All rights reserved.
++ */
++
+ #ifndef _SYS_FILIO_H
+ #define	_SYS_FILIO_H
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ /*
+  * General file ioctl definitions.
+  */
+@@ -137,6 +139,11 @@ extern "C" {
+  */
+ #define	_FIO_COMPRESSED		_IO('f', 99) /* mark file as compressed */
+ 
++/*
++ * Expose fill information through ioctl
++ */
++#define	_FIO_COUNT_FILLED	_IO('f', 100)	/* count holes in a file */
++
+ #ifdef	__cplusplus
+ }
+ #endif
+-- 
+1.8.3.1
+

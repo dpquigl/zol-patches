@@ -1,0 +1,725 @@
+From 97e81309571898df9fdd94aab1216dfcf23e060b Mon Sep 17 00:00:00 2001
+From: Prakash Surya <prakash.surya@delphix.com>
+Date: Wed, 6 Jan 2016 13:15:36 -0800
+Subject: [PATCH] 6531 Provide mechanism to artificially limit disk performance
+ Reviewed by: Paul Dagnelie <pcd@delphix.com> Reviewed by: Matthew Ahrens
+ <mahrens@delphix.com> Reviewed by: George Wilson <george.wilson@delphix.com>
+ Approved by: Dan McDonald <danmcd@omniti.com>
+
+---
+ cmd/zinject/zinject.c             | 111 ++++++++++++-
+ include/sys/zfs_ioctl.h |   1 +
+ include/sys/zio.h       |   5 +-
+ module/zfs/vdev_disk.c     |   5 +-
+ module/zfs/vdev_file.c     |   5 +-
+ module/zfs/vdev_queue.c    |   3 -
+ module/zfs/zio.c           |  52 ++++++
+ module/zfs/zio_inject.c    | 257 ++++++++++++++++++++++++++++--
+ 8 files changed, 413 insertions(+), 26 deletions(-)
+
+diff --git a/cmd/zinject/zinject.c b/cmd/zinject/zinject.c
+index b5c85b4..efae046 100644
+--- a/cmd/zinject/zinject.c
++++ b/cmd/zinject/zinject.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2012 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -225,21 +225,57 @@ usage(void)
+ 	    "\t\tall records if 'all' is specificed.\n"
+ 	    "\n"
+ 	    "\tzinject -p <function name> pool\n"
++	    "\n"
+ 	    "\t\tInject a panic fault at the specified function. Only \n"
+ 	    "\t\tfunctions which call spa_vdev_config_exit(), or \n"
+ 	    "\t\tspa_vdev_exit() will trigger a panic.\n"
+ 	    "\n"
+ 	    "\tzinject -d device [-e errno] [-L <nvlist|uber|pad1|pad2>] [-F]\n"
+ 	    "\t    [-T <read|write|free|claim|all> pool\n"
++	    "\n"
+ 	    "\t\tInject a fault into a particular device or the device's\n"
+ 	    "\t\tlabel.  Label injection can either be 'nvlist', 'uber',\n "
+ 	    "\t\t'pad1', or 'pad2'.\n"
+ 	    "\t\t'errno' can be 'nxio' (the default), 'io', or 'dtl'.\n"
+ 	    "\n"
+ 	    "\tzinject -d device -A <degrade|fault> pool\n"
++	    "\n"
+ 	    "\t\tPerform a specific action on a particular device\n"
+ 	    "\n"
++	    "\tzinject -d device -D latency:lanes pool\n"
++	    "\n"
++	    "\t\tAdd an artificial delay to IO requests on a particular\n"
++	    "\t\tdevice, such that the requests take a minimum of 'latency'\n"
++	    "\t\tmilliseconds to complete. Each delay has an associated\n"
++	    "\t\tnumber of 'lanes' which defines the number of concurrent\n"
++	    "\t\tIO requests that can be processed.\n"
++	    "\n"
++	    "\t\tFor example, with a single lane delay of 10 ms (-D 10:1),\n"
++	    "\t\tthe device will only be able to service a single IO request\n"
++	    "\t\tat a time with each request taking 10 ms to complete. So,\n"
++	    "\t\tif only a single request is submitted every 10 ms, the\n"
++	    "\t\taverage latency will be 10 ms; but if more than one request\n"
++	    "\t\tis submitted every 10 ms, the average latency will be more\n"
++	    "\t\tthan 10 ms.\n"
++	    "\n"
++	    "\t\tSimilarly, if a delay of 10 ms is specified to have two\n"
++	    "\t\tlanes (-D 10:2), then the device will be able to service\n"
++	    "\t\ttwo requests at a time, each with a minimum latency of\n"
++	    "\t\t10 ms. So, if two requests are submitted every 10 ms, then\n"
++	    "\t\tthe average latency will be 10 ms; but if more than two\n"
++	    "\t\trequests are submitted every 10 ms, the average latency\n"
++	    "\t\twill be more than 10 ms.\n"
++	    "\n"
++	    "\t\tAlso note, these delays are additive. So two invocations\n"
++	    "\t\tof '-D 10:1', is roughly equivalent to a single invocation\n"
++	    "\t\tof '-D 10:2'. This also means, one can specify multiple\n"
++	    "\t\tlanes with differing target latencies. For example, an\n"
++	    "\t\tinvocation of '-D 10:1' followed by '-D 25:2' will\n"
++	    "\t\tcreate 3 lanes on the device; one lane with a latency\n"
++	    "\t\tof 10 ms and two lanes with a 25 ms latency.\n"
++	    "\n"
+ 	    "\tzinject -I [-s <seconds> | -g <txgs>] pool\n"
++	    "\n"
+ 	    "\t\tCause the pool to stop writing blocks yet not\n"
+ 	    "\t\treport errors for a duration.  Simulates buggy hardware\n"
+ 	    "\t\tthat fails to honor cache flush requests.\n"
+@@ -353,6 +389,9 @@ print_device_handler(int id, const char *pool, zinject_record_t *record,
+ 	if (record->zi_guid == 0 || record->zi_func[0] != '\0')
+ 		return (0);
+ 
++	if (record->zi_cmd == ZINJECT_DELAY_IO)
++		return (0);
++
+ 	if (*count == 0) {
+ 		(void) printf("%3s  %-15s  %s\n", "ID", "POOL", "GUID");
+ 		(void) printf("---  ---------------  ----------------\n");
+@@ -367,6 +406,35 @@ print_device_handler(int id, const char *pool, zinject_record_t *record,
+ }
+ 
+ static int
++print_delay_handler(int id, const char *pool, zinject_record_t *record,
++    void *data)
++{
++	int *count = data;
++
++	if (record->zi_guid == 0 || record->zi_func[0] != '\0')
++		return (0);
++
++	if (record->zi_cmd != ZINJECT_DELAY_IO)
++		return (0);
++
++	if (*count == 0) {
++		(void) printf("%3s  %-15s  %-15s  %-15s  %s\n",
++		    "ID", "POOL", "DELAY (ms)", "LANES", "GUID");
++		(void) printf("---  ---------------  ---------------  "
++		    "---------------  ----------------\n");
++	}
++
++	*count += 1;
++
++	(void) printf("%3d  %-15s  %-15llu  %-15llu  %llx\n", id, pool,
++	    (u_longlong_t)NSEC2MSEC(record->zi_timer),
++	    (u_longlong_t)record->zi_nlanes,
++	    (u_longlong_t)record->zi_guid);
++
++	return (0);
++}
++
++static int
+ print_panic_handler(int id, const char *pool, zinject_record_t *record,
+     void *data)
+ {
+@@ -403,6 +471,13 @@ print_all_handlers(void)
+ 		count = 0;
+ 	}
+ 
++	(void) iter_handlers(print_delay_handler, &count);
++	if (count > 0) {
++		total += count;
++		(void) printf("\n");
++		count = 0;
++	}
++
+ 	(void) iter_handlers(print_data_handler, &count);
+ 	if (count > 0) {
+ 		total += count;
+@@ -545,6 +620,35 @@ perform_action(const char *pool, zinject_record_t *record, int cmd)
+ 	return (1);
+ }
+ 
++static int
++parse_delay(char *str, uint64_t *delay, uint64_t *nlanes)
++{
++	unsigned long scan_delay;
++	unsigned long scan_nlanes;
++
++	if (sscanf(str, "%lu:%lu", &scan_delay, &scan_nlanes) != 2)
++		return (1);
++
++	/*
++	 * We explicitly disallow a delay of zero here, because we key
++	 * off this value being non-zero in translate_device(), to
++	 * determine if the fault is a ZINJECT_DELAY_IO fault or not.
++	 */
++	if (scan_delay == 0)
++		return (1);
++
++	/*
++	 * The units for the CLI delay parameter is milliseconds, but
++	 * the data passed to the kernel is interpreted as nanoseconds.
++	 * Thus we scale the milliseconds to nanoseconds here, and this
++	 * nanosecond value is used to pass the delay to the kernel.
++	 */
++	*delay = MSEC2NSEC(scan_delay);
++	*nlanes = scan_nlanes;
++
++	return (0);
++}
++
+ int
+ main(int argc, char **argv)
+ {
+@@ -628,8 +732,9 @@ main(int argc, char **argv)
+ 			device = optarg;
+ 			break;
+ 		case 'D':
+-			record.zi_timer = strtoull(optarg, &end, 10);
+-			if (errno != 0 || *end != '\0') {
++			ret = parse_delay(optarg, &record.zi_timer,
++			    &record.zi_nlanes);
++			if (ret != 0) {
+ 				(void) fprintf(stderr, "invalid i/o delay "
+ 				    "value: '%s'\n", optarg);
+ 				usage();
+diff --git a/include/sys/zfs_ioctl.h b/include/sys/zfs_ioctl.h
+index 8fc49c7..6007c6e 100644
+--- a/include/sys/zfs_ioctl.h
++++ b/include/sys/zfs_ioctl.h
+@@ -292,6 +292,7 @@ typedef struct zinject_record {
+ 	uint32_t	zi_iotype;
+ 	int32_t		zi_duration;
+ 	uint64_t	zi_timer;
++	uint64_t	zi_nlanes;
+ 	uint32_t	zi_cmd;
+ 	uint32_t	zi_pad;
+ } zinject_record_t;
+diff --git a/include/sys/zio.h b/include/sys/zio.h
+index 877e283..edcd674 100644
+--- a/include/sys/zio.h
++++ b/include/sys/zio.h
+@@ -419,6 +419,7 @@ struct zio {
+ 
+ 	uint64_t	io_offset;
+ 	hrtime_t	io_timestamp;
++	hrtime_t	io_target_timestamp;
+ 	avl_node_t	io_queue_node;
+ 	avl_node_t	io_offset_node;
+ 
+@@ -506,6 +507,8 @@ extern int zio_wait(zio_t *zio);
+ extern void zio_nowait(zio_t *zio);
+ extern void zio_execute(zio_t *zio);
+ extern void zio_interrupt(zio_t *zio);
++extern void zio_delay_init(zio_t *zio);
++extern void zio_delay_interrupt(zio_t *zio);
+ 
+ extern zio_t *zio_walk_parents(zio_t *cio);
+ extern zio_t *zio_walk_children(zio_t *pio);
+@@ -567,7 +570,7 @@ extern int zio_handle_fault_injection(zio_t *zio, int error);
+ extern int zio_handle_device_injection(vdev_t *vd, zio_t *zio, int error);
+ extern int zio_handle_label_injection(zio_t *zio, int error);
+ extern void zio_handle_ignored_writes(zio_t *zio);
+-extern uint64_t zio_handle_io_delay(zio_t *zio);
++extern hrtime_t zio_handle_io_delay(zio_t *zio);
+ 
+ /*
+  * Checksum ereport functions
+diff --git a/module/zfs/vdev_disk.c b/module/zfs/vdev_disk.c
+index 9ed59b2..a6af010 100644
+--- a/module/zfs/vdev_disk.c
++++ b/module/zfs/vdev_disk.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2013 Joyent, Inc.  All rights reserved.
+  */
+@@ -691,7 +691,7 @@ vdev_disk_io_intr(buf_t *bp)
+ 
+ 	kmem_free(vb, sizeof (vdev_buf_t));
+ 
+-	zio_interrupt(zio);
++	zio_delay_interrupt(zio);
+ }
+ 
+ static void
+@@ -797,6 +797,7 @@ vdev_disk_io_start(zio_t *zio)
+ 	}
+ 
+ 	ASSERT(zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE);
++	zio->io_target_timestamp = zio_handle_io_delay(zio);
+ 
+ 	vb = kmem_alloc(sizeof (vdev_buf_t), KM_SLEEP);
+ 
+diff --git a/module/zfs/vdev_file.c b/module/zfs/vdev_file.c
+index d5bad45..633621b 100644
+--- a/module/zfs/vdev_file.c
++++ b/module/zfs/vdev_file.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  */
+ 
+ #include <sys/zfs_context.h>
+@@ -158,7 +158,7 @@ vdev_file_io_intr(buf_t *bp)
+ 		zio->io_error = SET_ERROR(ENOSPC);
+ 
+ 	kmem_free(vb, sizeof (vdev_buf_t));
+-	zio_interrupt(zio);
++	zio_delay_interrupt(zio);
+ }
+ 
+ static void
+@@ -212,6 +212,7 @@ vdev_file_io_start(zio_t *zio)
+ 	}
+ 
+ 	ASSERT(zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE);
++	zio->io_target_timestamp = zio_handle_io_delay(zio);
+ 
+ 	vb = kmem_alloc(sizeof (vdev_buf_t), KM_SLEEP);
+ 
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index 79d6e13..084c291 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -729,9 +729,6 @@ vdev_queue_io_done(zio_t *zio)
+ 	vdev_queue_t *vq = &zio->io_vd->vdev_queue;
+ 	zio_t *nio;
+ 
+-	if (zio_injection_enabled)
+-		delay(SEC_TO_TICK(zio_handle_io_delay(zio)));
+-
+ 	mutex_enter(&vq->vq_lock);
+ 
+ 	vdev_queue_pending_remove(vq, zio);
+diff --git a/module/zfs/zio.c b/module/zfs/zio.c
+index 4a3dafa..17c94f2 100644
+--- a/module/zfs/zio.c
++++ b/module/zfs/zio.c
+@@ -1352,6 +1352,58 @@ zio_interrupt(zio_t *zio)
+ 	zio_taskq_dispatch(zio, ZIO_TASKQ_INTERRUPT, B_FALSE);
+ }
+ 
++void
++zio_delay_interrupt(zio_t *zio)
++{
++	/*
++	 * The timeout_generic() function isn't defined in userspace, so
++	 * rather than trying to implement the function, the zio delay
++	 * functionality has been disabled for userspace builds.
++	 */
++
++#ifdef _KERNEL
++	/*
++	 * If io_target_timestamp is zero, then no delay has been registered
++	 * for this IO, thus jump to the end of this function and "skip" the
++	 * delay; issuing it directly to the zio layer.
++	 */
++	if (zio->io_target_timestamp != 0) {
++		hrtime_t now = gethrtime();
++
++		if (now >= zio->io_target_timestamp) {
++			/*
++			 * This IO has already taken longer than the target
++			 * delay to complete, so we don't want to delay it
++			 * any longer; we "miss" the delay and issue it
++			 * directly to the zio layer. This is likely due to
++			 * the target latency being set to a value less than
++			 * the underlying hardware can satisfy (e.g. delay
++			 * set to 1ms, but the disks take 10ms to complete an
++			 * IO request).
++			 */
++
++			DTRACE_PROBE2(zio__delay__miss, zio_t *, zio,
++			    hrtime_t, now);
++
++			zio_interrupt(zio);
++		} else {
++			hrtime_t diff = zio->io_target_timestamp - now;
++
++			DTRACE_PROBE3(zio__delay__hit, zio_t *, zio,
++			    hrtime_t, now, hrtime_t, diff);
++
++			(void) timeout_generic(CALLOUT_NORMAL,
++			    (void (*)(void *))zio_interrupt, zio, diff, 1, 0);
++		}
++
++		return;
++	}
++#endif
++
++	DTRACE_PROBE1(zio__delay__skip, zio_t *, zio);
++	zio_interrupt(zio);
++}
++
+ /*
+  * Execute the I/O pipeline until one of the following occurs:
+  *
+diff --git a/module/zfs/zio_inject.c b/module/zfs/zio_inject.c
+index 0a7f4e4..26f59af 100644
+--- a/module/zfs/zio_inject.c
++++ b/module/zfs/zio_inject.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  */
+ 
+ /*
+@@ -49,15 +49,53 @@
+ 
+ uint32_t zio_injection_enabled;
+ 
++/*
++ * Data describing each zinject handler registered on the system, and
++ * contains the list node linking the handler in the global zinject
++ * handler list.
++ */
+ typedef struct inject_handler {
+ 	int			zi_id;
+ 	spa_t			*zi_spa;
+ 	zinject_record_t	zi_record;
++	uint64_t		*zi_lanes;
++	int			zi_next_lane;
+ 	list_node_t		zi_link;
+ } inject_handler_t;
+ 
++/*
++ * List of all zinject handlers registered on the system, protected by
++ * the inject_lock defined below.
++ */
+ static list_t inject_handlers;
++
++/*
++ * This protects insertion into, and traversal of, the inject handler
++ * list defined above; as well as the inject_delay_count. Any time a
++ * handler is inserted or removed from the list, this lock should be
++ * taken as a RW_WRITER; and any time traversal is done over the list
++ * (without modification to it) this lock should be taken as a RW_READER.
++ */
+ static krwlock_t inject_lock;
++
++/*
++ * This holds the number of zinject delay handlers that have been
++ * registered on the system. It is protected by the inject_lock defined
++ * above. Thus modifications to this count must be a RW_WRITER of the
++ * inject_lock, and reads of this count must be (at least) a RW_READER
++ * of the lock.
++ */
++static int inject_delay_count = 0;
++
++/*
++ * This lock is used only in zio_handle_io_delay(), refer to the comment
++ * in that function for more details.
++ */
++static kmutex_t inject_delay_mtx;
++
++/*
++ * Used to assign unique identifying numbers to each new zinject handler.
++ */
+ static int inject_next_id = 1;
+ 
+ /*
+@@ -360,32 +398,164 @@ spa_handle_ignored_writes(spa_t *spa)
+ 	rw_exit(&inject_lock);
+ }
+ 
+-uint64_t
++hrtime_t
+ zio_handle_io_delay(zio_t *zio)
+ {
+ 	vdev_t *vd = zio->io_vd;
+-	inject_handler_t *handler;
+-	uint64_t seconds = 0;
+-
+-	if (zio_injection_enabled == 0)
+-		return (0);
++	inject_handler_t *min_handler = NULL;
++	hrtime_t min_target = 0;
+ 
+ 	rw_enter(&inject_lock, RW_READER);
+ 
+-	for (handler = list_head(&inject_handlers); handler != NULL;
+-	    handler = list_next(&inject_handlers, handler)) {
++	/*
++	 * inject_delay_count is a subset of zio_injection_enabled that
++	 * is only incremented for delay handlers. These checks are
++	 * mainly added to remind the reader why we're not explicitly
++	 * checking zio_injection_enabled like the other functions.
++	 */
++	IMPLY(inject_delay_count > 0, zio_injection_enabled > 0);
++	IMPLY(zio_injection_enabled == 0, inject_delay_count == 0);
++
++	/*
++	 * If there aren't any inject delay handlers registered, then we
++	 * can short circuit and simply return 0 here. A value of zero
++	 * informs zio_delay_interrupt() that this request should not be
++	 * delayed. This short circuit keeps us from acquiring the
++	 * inject_delay_mutex unnecessarily.
++	 */
++	if (inject_delay_count == 0) {
++		rw_exit(&inject_lock);
++		return (0);
++	}
++
++	/*
++	 * Each inject handler has a number of "lanes" associated with
++	 * it. Each lane is able to handle requests independently of one
++	 * another, and at a latency defined by the inject handler
++	 * record's zi_timer field. Thus if a handler in configured with
++	 * a single lane with a 10ms latency, it will delay requests
++	 * such that only a single request is completed every 10ms. So,
++	 * if more than one request is attempted per each 10ms interval,
++	 * the average latency of the requests will be greater than
++	 * 10ms; but if only a single request is submitted each 10ms
++	 * interval the average latency will be 10ms.
++	 *
++	 * We need to acquire this mutex to prevent multiple concurrent
++	 * threads being assigned to the same lane of a given inject
++	 * handler. The mutex allows us to perform the following two
++	 * operations atomically:
++	 *
++	 *	1. determine the minimum handler and minimum target
++	 *	   value of all the possible handlers
++	 *	2. update that minimum handler's lane array
++	 *
++	 * Without atomicity, two (or more) threads could pick the same
++	 * lane in step (1), and then conflict with each other in step
++	 * (2). This could allow a single lane handler to process
++	 * multiple requests simultaneously, which shouldn't be possible.
++	 */
++	mutex_enter(&inject_delay_mtx);
+ 
++	for (inject_handler_t *handler = list_head(&inject_handlers);
++	    handler != NULL; handler = list_next(&inject_handlers, handler)) {
+ 		if (handler->zi_record.zi_cmd != ZINJECT_DELAY_IO)
+ 			continue;
+ 
+-		if (vd->vdev_guid == handler->zi_record.zi_guid) {
+-			seconds = handler->zi_record.zi_timer;
+-			break;
++		if (vd->vdev_guid != handler->zi_record.zi_guid)
++			continue;
++
++		/*
++		 * Defensive; should never happen as the array allocation
++		 * occurs prior to inserting this handler on the list.
++		 */
++		ASSERT3P(handler->zi_lanes, !=, NULL);
++
++		/*
++		 * This should never happen, the zinject command should
++		 * prevent a user from setting an IO delay with zero lanes.
++		 */
++		ASSERT3U(handler->zi_record.zi_nlanes, !=, 0);
++
++		ASSERT3U(handler->zi_record.zi_nlanes, >,
++		    handler->zi_next_lane);
++
++		/*
++		 * We want to issue this IO to the lane that will become
++		 * idle the soonest, so we compare the soonest this
++		 * specific handler can complete the IO with all other
++		 * handlers, to find the lowest value of all possible
++		 * lanes. We then use this lane to submit the request.
++		 *
++		 * Since each handler has a constant value for its
++		 * delay, we can just use the "next" lane for that
++		 * handler; as it will always be the lane with the
++		 * lowest value for that particular handler (i.e. the
++		 * lane that will become idle the soonest). This saves a
++		 * scan of each handler's lanes array.
++		 *
++		 * There's two cases to consider when determining when
++		 * this specific IO request should complete. If this
++		 * lane is idle, we want to "submit" the request now so
++		 * it will complete after zi_timer milliseconds. Thus,
++		 * we set the target to now + zi_timer.
++		 *
++		 * If the lane is busy, we want this request to complete
++		 * zi_timer milliseconds after the lane becomes idle.
++		 * Since the 'zi_lanes' array holds the time at which
++		 * each lane will become idle, we use that value to
++		 * determine when this request should complete.
++		 */
++		hrtime_t idle = handler->zi_record.zi_timer + gethrtime();
++		hrtime_t busy = handler->zi_record.zi_timer +
++		    handler->zi_lanes[handler->zi_next_lane];
++		hrtime_t target = MAX(idle, busy);
++
++		if (min_handler == NULL) {
++			min_handler = handler;
++			min_target = target;
++			continue;
+ 		}
+ 
++		ASSERT3P(min_handler, !=, NULL);
++		ASSERT3U(min_target, !=, 0);
++
++		/*
++		 * We don't yet increment the "next lane" variable since
++		 * we still might find a lower value lane in another
++		 * handler during any remaining iterations. Once we're
++		 * sure we've selected the absolute minimum, we'll claim
++		 * the lane and increment the handler's "next lane"
++		 * field below.
++		 */
++
++		if (target < min_target) {
++			min_handler = handler;
++			min_target = target;
++		}
+ 	}
++
++	/*
++	 * 'min_handler' will be NULL if no IO delays are registered for
++	 * this vdev, otherwise it will point to the handler containing
++	 * the lane that will become idle the soonest.
++	 */
++	if (min_handler != NULL) {
++		ASSERT3U(min_target, !=, 0);
++		min_handler->zi_lanes[min_handler->zi_next_lane] = min_target;
++
++		/*
++		 * If we've used all possible lanes for this handler,
++		 * loop back and start using the first lane again;
++		 * otherwise, just increment the lane index.
++		 */
++		min_handler->zi_next_lane = (min_handler->zi_next_lane + 1) %
++		    min_handler->zi_record.zi_nlanes;
++	}
++
++	mutex_exit(&inject_delay_mtx);
+ 	rw_exit(&inject_lock);
+-	return (seconds);
++
++	return (min_target);
+ }
+ 
+ /*
+@@ -409,6 +579,24 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
+ 		if ((error = spa_reset(name)) != 0)
+ 			return (error);
+ 
++	if (record->zi_cmd == ZINJECT_DELAY_IO) {
++		/*
++		 * A value of zero for the number of lanes or for the
++		 * delay time doesn't make sense.
++		 */
++		if (record->zi_timer == 0 || record->zi_nlanes == 0)
++			return (SET_ERROR(EINVAL));
++
++		/*
++		 * The number of lanes is directly mapped to the size of
++		 * an array used by the handler. Thus, to ensure the
++		 * user doesn't trigger an allocation that's "too large"
++		 * we cap the number of lanes here.
++		 */
++		if (record->zi_nlanes >= UINT16_MAX)
++			return (SET_ERROR(EINVAL));
++	}
++
+ 	if (!(flags & ZINJECT_NULL)) {
+ 		/*
+ 		 * spa_inject_ref() will add an injection reference, which will
+@@ -420,11 +608,34 @@ zio_inject_fault(char *name, int flags, int *id, zinject_record_t *record)
+ 
+ 		handler = kmem_alloc(sizeof (inject_handler_t), KM_SLEEP);
+ 
++		handler->zi_spa = spa;
++		handler->zi_record = *record;
++
++		if (handler->zi_record.zi_cmd == ZINJECT_DELAY_IO) {
++			handler->zi_lanes = kmem_zalloc(
++			    sizeof (*handler->zi_lanes) *
++			    handler->zi_record.zi_nlanes, KM_SLEEP);
++			handler->zi_next_lane = 0;
++		} else {
++			handler->zi_lanes = NULL;
++			handler->zi_next_lane = 0;
++		}
++
+ 		rw_enter(&inject_lock, RW_WRITER);
+ 
++		/*
++		 * We can't move this increment into the conditional
++		 * above because we need to hold the RW_WRITER lock of
++		 * inject_lock, and we don't want to hold that while
++		 * allocating the handler's zi_lanes array.
++		 */
++		if (handler->zi_record.zi_cmd == ZINJECT_DELAY_IO) {
++			ASSERT3S(inject_delay_count, >=, 0);
++			inject_delay_count++;
++			ASSERT3S(inject_delay_count, >, 0);
++		}
++
+ 		*id = handler->zi_id = inject_next_id++;
+-		handler->zi_spa = spa;
+-		handler->zi_record = *record;
+ 		list_insert_tail(&inject_handlers, handler);
+ 		atomic_inc_32(&zio_injection_enabled);
+ 
+@@ -502,9 +713,23 @@ zio_clear_fault(int id)
+ 		return (SET_ERROR(ENOENT));
+ 	}
+ 
++	if (handler->zi_record.zi_cmd == ZINJECT_DELAY_IO) {
++		ASSERT3S(inject_delay_count, >, 0);
++		inject_delay_count--;
++		ASSERT3S(inject_delay_count, >=, 0);
++	}
++
+ 	list_remove(&inject_handlers, handler);
+ 	rw_exit(&inject_lock);
+ 
++	if (handler->zi_record.zi_cmd == ZINJECT_DELAY_IO) {
++		ASSERT3P(handler->zi_lanes, !=, NULL);
++		kmem_free(handler->zi_lanes, sizeof (*handler->zi_lanes) *
++		    handler->zi_record.zi_nlanes);
++	} else {
++		ASSERT3P(handler->zi_lanes, ==, NULL);
++	}
++
+ 	spa_inject_delref(handler->zi_spa);
+ 	kmem_free(handler, sizeof (inject_handler_t));
+ 	atomic_dec_32(&zio_injection_enabled);
+@@ -516,6 +741,7 @@ void
+ zio_inject_init(void)
+ {
+ 	rw_init(&inject_lock, NULL, RW_DEFAULT, NULL);
++	mutex_init(&inject_delay_mtx, NULL, MUTEX_DEFAULT, NULL);
+ 	list_create(&inject_handlers, sizeof (inject_handler_t),
+ 	    offsetof(inject_handler_t, zi_link));
+ }
+@@ -524,5 +750,6 @@ void
+ zio_inject_fini(void)
+ {
+ 	list_destroy(&inject_handlers);
++	mutex_destroy(&inject_delay_mtx);
+ 	rw_destroy(&inject_lock);
+ }
+-- 
+1.8.3.1
+

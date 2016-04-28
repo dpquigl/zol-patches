@@ -1,0 +1,85 @@
+From a8f6344fa0921599e1f4511e41b5f9a25c38c0f9 Mon Sep 17 00:00:00 2001
+From: Eli Rosenthal <eli.rosenthal@delphix.com>
+Date: Wed, 2 Mar 2016 14:51:48 -0800
+Subject: [PATCH] 6672 arc_reclaim_thread() should use gethrtime() instead of
+ ddi_get_lbolt() 6673 want a macro to convert seconds to nanoseconds and
+ vice-versa Reviewed by: Matthew Ahrens <mahrens@delphix.com> Reviewed by:
+ Prakash Surya <prakash.surya@delphix.com> Reviewed by: Josef 'Jeff' Sipek
+ <jeffpc@josefsipek.net> Reviewed by: Robert Mustacchi <rm@joyent.com>
+ Approved by: Dan McDonald <danmcd@omniti.com>
+
+---
+ module/zfs/arc.c | 10 +++++-----
+ include/sys/time.h   |  7 +++++++
+ 2 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/module/zfs/arc.c b/module/zfs/arc.c
+index e43e009..1eec1f8 100644
+--- a/module/zfs/arc.c
++++ b/module/zfs/arc.c
+@@ -3352,7 +3352,7 @@ arc_kmem_reap_now(void)
+ static void
+ arc_reclaim_thread(void)
+ {
+-	clock_t			growtime = 0;
++	hrtime_t		growtime = 0;
+ 	callb_cpr_t		cpr;
+ 
+ 	CALLB_CPR_INIT(&cpr, &arc_reclaim_lock, callb_generic_cpr, FTAG);
+@@ -3373,7 +3373,7 @@ arc_reclaim_thread(void)
+ 			 * Wait at least zfs_grow_retry (default 60) seconds
+ 			 * before considering growing.
+ 			 */
+-			growtime = ddi_get_lbolt() + (arc_grow_retry * hz);
++			growtime = gethrtime() + SEC2NSEC(arc_grow_retry);
+ 
+ 			arc_kmem_reap_now();
+ 
+@@ -3393,7 +3393,7 @@ arc_reclaim_thread(void)
+ 			}
+ 		} else if (free_memory < arc_c >> arc_no_grow_shift) {
+ 			arc_no_grow = B_TRUE;
+-		} else if (ddi_get_lbolt() >= growtime) {
++		} else if (gethrtime() >= growtime) {
+ 			arc_no_grow = B_FALSE;
+ 		}
+ 
+@@ -3424,8 +3424,8 @@ arc_reclaim_thread(void)
+ 			 * even if we aren't being signalled)
+ 			 */
+ 			CALLB_CPR_SAFE_BEGIN(&cpr);
+-			(void) cv_timedwait(&arc_reclaim_thread_cv,
+-			    &arc_reclaim_lock, ddi_get_lbolt() + hz);
++			(void) cv_timedwait_hires(&arc_reclaim_thread_cv,
++			    &arc_reclaim_lock, SEC2NSEC(1), MSEC2NSEC(1), 0);
+ 			CALLB_CPR_SAFE_END(&cpr, &arc_reclaim_lock);
+ 		}
+ 	}
+diff --git a/include/sys/time.h b/include/sys/time.h
+index b2ba0a3..05cc855 100644
+--- a/include/sys/time.h
++++ b/include/sys/time.h
+@@ -17,6 +17,10 @@
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
++/*
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
++ */
++
+ #ifndef _SYS_TIME_H
+ #define	_SYS_TIME_H
+ 
+@@ -243,6 +247,9 @@ struct itimerval32 {
+ #define	MSEC2NSEC(m)	((hrtime_t)(m) * (NANOSEC / MILLISEC))
+ #define	NSEC2MSEC(n)	((n) / (NANOSEC / MILLISEC))
+ 
++#define	NSEC2SEC(n)	((n) / (NANOSEC / SEC))
++#define	SEC2NSEC(m)	((hrtime_t)(m) * (NANOSEC / SEC))
++
+ #endif /* !defined(__XOPEN_OR_POSIX) || defined(__EXTENSIONS__) */
+ 
+ #ifndef	_ASM
+-- 
+1.8.3.1
+

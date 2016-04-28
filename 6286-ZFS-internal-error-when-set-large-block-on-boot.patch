@@ -1,0 +1,46 @@
+From 6de9bb5603e65b16816b7ab29e39bac820e2da2b Mon Sep 17 00:00:00 2001
+From: Matthew Ahrens <mahrens@delphix.com>
+Date: Fri, 9 Oct 2015 10:53:56 -0700
+Subject: [PATCH] 6286 ZFS internal error when set large block on bootfs
+ Reviewed by: Paul Dagnelie <pcd@delphix.com> Reviewed by: George Wilson
+ <george.wilson@delphix.com> Reviewed by: Andriy Gapon <avg@FreeBSD.org>
+ Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ module/zfs/zfs_ioctl.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/module/zfs/zfs_ioctl.c b/module/zfs/zfs_ioctl.c
+index 73cf63a..0388ca2 100644
+--- a/module/zfs/zfs_ioctl.c
++++ b/module/zfs/zfs_ioctl.c
+@@ -24,7 +24,7 @@
+  * Portions Copyright 2011 Martin Matuska
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014, Joyent, Inc. All rights reserved.
+- * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  */
+@@ -3831,7 +3831,7 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
+ 			 */
+ 			if (zfs_is_bootfs(dsname) &&
+ 			    intval > SPA_OLD_MAXBLOCKSIZE) {
+-				return (SET_ERROR(EDOM));
++				return (SET_ERROR(ERANGE));
+ 			}
+ 
+ 			/*
+@@ -3840,7 +3840,7 @@ zfs_check_settable(const char *dsname, nvpair_t *pair, cred_t *cr)
+ 			 */
+ 			if (intval > zfs_max_recordsize ||
+ 			    intval > SPA_MAXBLOCKSIZE)
+-				return (SET_ERROR(EDOM));
++				return (SET_ERROR(ERANGE));
+ 
+ 			if ((err = spa_open(dsname, &spa, FTAG)) != 0)
+ 				return (err);
+-- 
+1.8.3.1
+

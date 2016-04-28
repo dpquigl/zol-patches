@@ -1,0 +1,87 @@
+From fae6347731c9d3f46b26338313b0422927f29cf6 Mon Sep 17 00:00:00 2001
+From: Prakash Surya <prakash.surya@delphix.com>
+Date: Sat, 16 May 2015 11:53:51 -0700
+Subject: [PATCH] 5815 libzpool's panic function doesn't set global panicstr,
+ ::status not as useful Reviewed by: Matthew Ahrens <mahrens@delphix.com>
+ Reviewed by: Sebastien Roy <sebastien.roy@delphix.com> Reviewed by: Gordon
+ Ross <gordon.ross@nexenta.com> Reviewed by: Rich Lowe <richlowe@richlowe.net>
+ Approved by: Dan McDonald <danmcd@omniti.com>
+
+---
+ usr/src/lib/libc/port/threads/assfail.c | 28 ++++++++++++++++++++++------
+ lib/libzpool/kernel.c    |  8 +++-----
+ 2 files changed, 25 insertions(+), 11 deletions(-)
+
+diff --git a/usr/src/lib/libc/port/threads/assfail.c b/usr/src/lib/libc/port/threads/assfail.c
+index 7a98884..8aebefb 100644
+--- a/usr/src/lib/libc/port/threads/assfail.c
++++ b/usr/src/lib/libc/port/threads/assfail.c
+@@ -24,7 +24,7 @@
+  * Use is subject to license terms.
+  */
+ /*
+- * Copyright (c) 2012 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+  */
+ 
+ #include "lint.h"
+@@ -409,16 +409,32 @@ __assfail(const char *assertion, const char *filename, int line_num)
+ 		lwpid = _lwp_self();
+ 	}
+ 
+-	(void) strcpy(buf, "assertion failed for thread ");
++	/*
++	 * This is a hack, but since the Abort function isn't exported
++	 * to outside consumers, libzpool's vpanic() function calls
++	 * assfail() with a filename set to NULL. In that case, it'd be
++	 * best not to print "assertion failed" since it was a panic and
++	 * not an assertion failure.
++	 */
++	if (filename == NULL) {
++		(void) strcpy(buf, "failure for thread ");
++	} else {
++		(void) strcpy(buf, "assertion failed for thread ");
++	}
++
+ 	ultos((uint64_t)(uintptr_t)self, 16, buf + strlen(buf));
+ 	(void) strcat(buf, ", thread-id ");
+ 	ultos((uint64_t)lwpid, 10, buf + strlen(buf));
+ 	(void) strcat(buf, ": ");
+ 	(void) strcat(buf, assertion);
+-	(void) strcat(buf, ", file ");
+-	(void) strcat(buf, filename);
+-	(void) strcat(buf, ", line ");
+-	ultos((uint64_t)line_num, 10, buf + strlen(buf));
++
++	if (filename != NULL) {
++		(void) strcat(buf, ", file ");
++		(void) strcat(buf, filename);
++		(void) strcat(buf, ", line ");
++		ultos((uint64_t)line_num, 10, buf + strlen(buf));
++	}
++
+ 	(void) strcat(buf, "\n");
+ 	(void) __write(2, buf, strlen(buf));
+ 	/*
+diff --git a/lib/libzpool/kernel.c b/lib/libzpool/kernel.c
+index 5e32973..dd4221d 100644
+--- a/lib/libzpool/kernel.c
++++ b/lib/libzpool/kernel.c
+@@ -691,11 +691,9 @@ static char ce_suffix[CE_IGNORE][2] = { "", "\n", "\n", "" };
+ void
+ vpanic(const char *fmt, va_list adx)
+ {
+-	(void) fprintf(stderr, "error: ");
+-	(void) vfprintf(stderr, fmt, adx);
+-	(void) fprintf(stderr, "\n");
+-
+-	abort();	/* think of it as a "user-level crash dump" */
++	char buf[512];
++	(void) vsnprintf(buf, 512, fmt, adx);
++	assfail(buf, NULL, 0);
+ }
+ 
+ void
+-- 
+1.8.3.1
+

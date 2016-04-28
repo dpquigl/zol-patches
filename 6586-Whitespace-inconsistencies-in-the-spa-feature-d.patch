@@ -1,0 +1,43 @@
+From 22b6687e7850d421c61bf433a388b7db306aca00 Mon Sep 17 00:00:00 2001
+From: ilovezfs <ilovezfs@icloud.com>
+Date: Thu, 28 Jan 2016 04:52:17 -0800
+Subject: [PATCH] 6586 Whitespace inconsistencies in the spa feature dependency
+ arrays in zfeature_common.c Reviewed by: Matthew Ahrens <mahrens@delphix.com>
+ Reviewed by: Richard Laager <rlaager@wiktel.com> Approved by: Robert
+ Mustacchi <rm@joyent.com>
+
+---
+ usr/src/common/zfs/zfeature_common.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/usr/src/common/zfs/zfeature_common.c b/usr/src/common/zfs/zfeature_common.c
+index 8bd91d7..6c878bf 100644
+--- a/usr/src/common/zfs/zfeature_common.c
++++ b/usr/src/common/zfs/zfeature_common.c
+@@ -188,8 +188,10 @@ zpool_feature_init(void)
+ 	    "Record txg at which a feature is enabled",
+ 	    ZFEATURE_FLAG_READONLY_COMPAT, NULL);
+ 
+-	static spa_feature_t hole_birth_deps[] = { SPA_FEATURE_ENABLED_TXG,
+-	    SPA_FEATURE_NONE };
++	static spa_feature_t hole_birth_deps[] = {
++		SPA_FEATURE_ENABLED_TXG,
++		SPA_FEATURE_NONE
++	};
+ 	zfeature_register(SPA_FEATURE_HOLE_BIRTH,
+ 	    "com.delphix:hole_birth", "hole_birth",
+ 	    "Retain hole birth txg for more precise zfs send",
+@@ -211,8 +213,8 @@ zpool_feature_init(void)
+ 	    ZFEATURE_FLAG_READONLY_COMPAT, bookmarks_deps);
+ 
+ 	static const spa_feature_t filesystem_limits_deps[] = {
+-	    SPA_FEATURE_EXTENSIBLE_DATASET,
+-	    SPA_FEATURE_NONE
++		SPA_FEATURE_EXTENSIBLE_DATASET,
++		SPA_FEATURE_NONE
+ 	};
+ 	zfeature_register(SPA_FEATURE_FS_SS_LIMIT,
+ 	    "com.joyent:filesystem_limits", "filesystem_limits",
+-- 
+1.8.3.1
+

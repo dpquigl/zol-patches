@@ -1,0 +1,27 @@
+From c423721f9bcd45c2409ef7b73fc103ac2889f9e9 Mon Sep 17 00:00:00 2001
+From: Xin Li <delphij@freebsd.org>
+Date: Wed, 27 May 2015 16:10:16 +0200
+Subject: [PATCH] 5669 altroot not set in zpool create when specified with -o
+ Reviewed by: Matthew Ahrens <mahrens@delphix.com> Reviewed by: George Wilson
+ <george@delphix.com> Approved by: Dan McDonald <danmcd@omniti.com>
+
+---
+ cmd/zpool/zpool_main.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/cmd/zpool/zpool_main.c b/cmd/zpool/zpool_main.c
+index 143ee21..fcac699 100644
+--- a/cmd/zpool/zpool_main.c
++++ b/cmd/zpool/zpool_main.c
+@@ -707,6 +707,8 @@ zpool_do_create(int argc, char **argv)
+ 					enable_all_pool_feat = B_FALSE;
+ 				}
+ 			}
++			if (zpool_name_to_prop(optarg) == ZPOOL_PROP_ALTROOT)
++				altroot = propval;
+ 			break;
+ 		case 'O':
+ 			if ((propval = strchr(optarg, '=')) == NULL) {
+-- 
+1.8.3.1
+

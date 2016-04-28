@@ -1,0 +1,41 @@
+From f693d300fbefaa2bd9a229a874b5994532a30d87 Mon Sep 17 00:00:00 2001
+From: Steven Hartland <steven.hartland@multiplay.co.uk>
+Date: Tue, 15 Dec 2015 11:57:22 -0800
+Subject: [PATCH] 6494 ASSERT supported zio_types for file and disk vdevs
+ Reviewed by: George Wilson <george.wilson@delphix.com> Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Approved by: Albert Lee <trisk@omniti.com>
+
+---
+ module/zfs/vdev_disk.c | 2 ++
+ module/zfs/vdev_file.c | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/module/zfs/vdev_disk.c b/module/zfs/vdev_disk.c
+index ed4a8b7..9ed59b2 100644
+--- a/module/zfs/vdev_disk.c
++++ b/module/zfs/vdev_disk.c
+@@ -796,6 +796,8 @@ vdev_disk_io_start(zio_t *zio)
+ 		return;
+ 	}
+ 
++	ASSERT(zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE);
++
+ 	vb = kmem_alloc(sizeof (vdev_buf_t), KM_SLEEP);
+ 
+ 	vb->vb_io = zio;
+diff --git a/module/zfs/vdev_file.c b/module/zfs/vdev_file.c
+index 5dfc331..d5bad45 100644
+--- a/module/zfs/vdev_file.c
++++ b/module/zfs/vdev_file.c
+@@ -211,6 +211,8 @@ vdev_file_io_start(zio_t *zio)
+ 		return;
+ 	}
+ 
++	ASSERT(zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE);
++
+ 	vb = kmem_alloc(sizeof (vdev_buf_t), KM_SLEEP);
+ 
+ 	vb->vb_io = zio;
+-- 
+1.8.3.1
+

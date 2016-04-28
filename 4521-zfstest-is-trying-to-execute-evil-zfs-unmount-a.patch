@@ -1,0 +1,267 @@
+From 8808ac5dae118369991f158b6ab736cb2691ecde Mon Sep 17 00:00:00 2001
+From: Yuri Pankov <yuri.pankov@nexenta.com>
+Date: Sun, 21 Feb 2016 20:54:49 -0800
+Subject: [PATCH] 4521 zfstest is trying to execute evil "zfs unmount -a"
+ Reviewed by: Andriy Gapon <avg@FreeBSD.org> Reviewed by: Dan McDonald
+ <danmcd@omniti.com> Reviewed by: Matthew Ahrens <mahrens@delphix.com>
+ Reviewed by: John Kennedy <john.kennedy@delphix.com> Approved by: Robert
+ Mustacchi <rm@joyent.com>
+
+---
+ cmd/zfs/zfs_main.c                     | 11 +++++++-
+ include/libzfs.h             |  4 ++-
+ lib/libzfs/libzfs_config.c      | 35 ++++++++++++++++++--------
+ lib/libzfs/libzfs_dataset.c     | 11 +++++++-
+ lib/libzfs/mapfile-vers         |  8 +++++-
+ usr/src/test/zfs-tests/cmd/scripts/zfstest.ksh | 12 ++++++---
+ 6 files changed, 63 insertions(+), 18 deletions(-)
+
+diff --git a/cmd/zfs/zfs_main.c b/cmd/zfs/zfs_main.c
+index 75806e2..d0627c9 100644
+--- a/cmd/zfs/zfs_main.c
++++ b/cmd/zfs/zfs_main.c
+@@ -25,9 +25,9 @@
+  * Copyright 2012 Milan Jurik. All rights reserved.
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland.  All rights reserved.
+- * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Integros [integros.com]
+  * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ #include <assert.h>
+@@ -6376,6 +6376,15 @@ unshare_unmount(int op, int argc, char **argv)
+ 				continue;
+ 			}
+ 
++			/*
++			 * Ignore datasets that are excluded/restricted by
++			 * parent pool name.
++			 */
++			if (zpool_skip_pool(zfs_get_pool_name(zhp))) {
++				zfs_close(zhp);
++				continue;
++			}
++
+ 			switch (op) {
+ 			case OP_SHARE:
+ 				verify(zfs_prop_get(zhp, ZFS_PROP_SHARENFS,
+diff --git a/include/libzfs.h b/include/libzfs.h
+index 68f9f6f..65beb6b 100644
+--- a/include/libzfs.h
++++ b/include/libzfs.h
+@@ -24,8 +24,8 @@
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+- * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Integros [integros.com]
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ #ifndef	_LIBZFS_H
+@@ -218,6 +218,7 @@ extern void zpool_free_handles(libzfs_handle_t *);
+  */
+ typedef int (*zpool_iter_f)(zpool_handle_t *, void *);
+ extern int zpool_iter(libzfs_handle_t *, zpool_iter_f, void *);
++extern boolean_t zpool_skip_pool(const char *);
+ 
+ /*
+  * Functions to create and destroy pools
+@@ -407,6 +408,7 @@ extern void zfs_close(zfs_handle_t *);
+ extern zfs_type_t zfs_get_type(const zfs_handle_t *);
+ extern const char *zfs_get_name(const zfs_handle_t *);
+ extern zpool_handle_t *zfs_get_pool_handle(const zfs_handle_t *);
++extern const char *zfs_get_pool_name(const zfs_handle_t *);
+ 
+ /*
+  * Property management functions.  Some functions are shared with the kernel,
+diff --git a/lib/libzfs/libzfs_config.c b/lib/libzfs/libzfs_config.c
+index c3dafd6..fe380a2 100644
+--- a/lib/libzfs/libzfs_config.c
++++ b/lib/libzfs/libzfs_config.c
+@@ -27,6 +27,7 @@
+ /*
+  * Copyright (c) 2012 by Delphix. All rights reserved.
+  * Copyright (c) 2015 by Syneto S.R.L. All rights reserved.
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ /*
+@@ -339,33 +340,47 @@ zpool_refresh_stats(zpool_handle_t *zhp, boolean_t *missing)
+ }
+ 
+ /*
+- * If the __ZFS_POOL_RESTRICT environment variable is set we only iterate over
+- * pools it lists.
++ * The following environment variables are undocumented
++ * and should be used for testing purposes only:
+  *
+- * This is an undocumented feature for use during testing only.
++ * __ZFS_POOL_EXCLUDE - don't iterate over the pools it lists
++ * __ZFS_POOL_RESTRICT - iterate only over the pools it lists
+  *
+  * This function returns B_TRUE if the pool should be skipped
+  * during iteration.
+  */
+-static boolean_t
+-check_restricted(const char *poolname)
++boolean_t
++zpool_skip_pool(const char *poolname)
+ {
+ 	static boolean_t initialized = B_FALSE;
+-	static char *restricted = NULL;
++	static const char *exclude = NULL;
++	static const char *restricted = NULL;
+ 
+ 	const char *cur, *end;
+-	int len, namelen;
++	int len;
++	int namelen = strlen(poolname);
+ 
+ 	if (!initialized) {
+ 		initialized = B_TRUE;
++		exclude = getenv("__ZFS_POOL_EXCLUDE");
+ 		restricted = getenv("__ZFS_POOL_RESTRICT");
+ 	}
+ 
++	if (exclude != NULL) {
++		cur = exclude;
++		do {
++			end = strchr(cur, ' ');
++			len = (NULL == end) ? strlen(cur) : (end - cur);
++			if (len == namelen && 0 == strncmp(cur, poolname, len))
++				return (B_TRUE);
++			cur += (len + 1);
++		} while (NULL != end);
++	}
++
+ 	if (NULL == restricted)
+ 		return (B_FALSE);
+ 
+ 	cur = restricted;
+-	namelen = strlen(poolname);
+ 	do {
+ 		end = strchr(cur, ' ');
+ 		len = (NULL == end) ? strlen(cur) : (end - cur);
+@@ -403,7 +418,7 @@ zpool_iter(libzfs_handle_t *hdl, zpool_iter_f func, void *data)
+ 	for (cn = uu_avl_first(hdl->libzfs_ns_avl); cn != NULL;
+ 	    cn = uu_avl_next(hdl->libzfs_ns_avl, cn)) {
+ 
+-		if (check_restricted(cn->cn_name))
++		if (zpool_skip_pool(cn->cn_name))
+ 			continue;
+ 
+ 		if (zpool_open_silent(hdl, cn->cn_name, &zhp) != 0) {
+@@ -441,7 +456,7 @@ zfs_iter_root(libzfs_handle_t *hdl, zfs_iter_f func, void *data)
+ 	for (cn = uu_avl_first(hdl->libzfs_ns_avl); cn != NULL;
+ 	    cn = uu_avl_next(hdl->libzfs_ns_avl, cn)) {
+ 
+-		if (check_restricted(cn->cn_name))
++		if (zpool_skip_pool(cn->cn_name))
+ 			continue;
+ 
+ 		if ((zhp = make_dataset_handle(hdl, cn->cn_name)) == NULL)
+diff --git a/lib/libzfs/libzfs_dataset.c b/lib/libzfs/libzfs_dataset.c
+index 39e7d6d..9fa9974 100644
+--- a/lib/libzfs/libzfs_dataset.c
++++ b/lib/libzfs/libzfs_dataset.c
+@@ -26,8 +26,8 @@
+  * Copyright (c) 2012 DEY Storage Systems, Inc.  All rights reserved.
+  * Copyright (c) 2013 Martin Matuska. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+- * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Integros [integros.com]
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ #include <ctype.h>
+@@ -2891,6 +2891,15 @@ zfs_get_name(const zfs_handle_t *zhp)
+ }
+ 
+ /*
++ * Returns the name of the parent pool for the given zfs handle.
++ */
++const char *
++zfs_get_pool_name(const zfs_handle_t *zhp)
++{
++	return (zhp->zpool_hdl->zpool_name);
++}
++
++/*
+  * Returns the type of the given zfs handle.
+  */
+ zfs_type_t
+diff --git a/lib/libzfs/mapfile-vers b/lib/libzfs/mapfile-vers
+index dc72ab0..ff0c552 100644
+--- a/lib/libzfs/mapfile-vers
++++ b/lib/libzfs/mapfile-vers
+@@ -18,9 +18,13 @@
+ #
+ # CDDL HEADER END
+ #
++
++#
+ # Copyright (c) 2006, 2010, Oracle and/or its affiliates. All rights reserved.
+-# Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+ # Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++# Copyright 2016 Nexenta Systems, Inc.
++#
++
+ #
+ # MAPFILE HEADER START
+ #
+@@ -78,6 +82,7 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zfs_get_hole_count;
+ 	zfs_get_name;
+ 	zfs_get_pool_handle;
++	zfs_get_pool_name;
+ 	zfs_get_user_props;
+ 	zfs_get_type;
+ 	zfs_handle_dup;
+@@ -230,6 +235,7 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zpool_scan;
+ 	zpool_search_import;
+ 	zpool_set_prop;
++	zpool_skip_pool;
+ 	zpool_state_to_name;
+ 	zpool_unmount_datasets;
+ 	zpool_upgrade;
+diff --git a/usr/src/test/zfs-tests/cmd/scripts/zfstest.ksh b/usr/src/test/zfs-tests/cmd/scripts/zfstest.ksh
+index d86faa7..1695f5d 100644
+--- a/usr/src/test/zfs-tests/cmd/scripts/zfstest.ksh
++++ b/usr/src/test/zfs-tests/cmd/scripts/zfstest.ksh
+@@ -14,6 +14,7 @@
+ #
+ # Copyright (c) 2012 by Delphix. All rights reserved.
+ # Copyright 2014, OmniTI Computer Consulting, Inc. All rights reserved.
++# Copyright 2016 Nexenta Systems, Inc.
+ #
+ 
+ export STF_SUITE="/opt/zfs-tests"
+@@ -115,14 +116,17 @@ else
+ 	verify_disks || fail "Couldn't verify all the disks in \$DISKS"
+ fi
+ 
+-# Add the rpool to $KEEP according to its contents. It's ok to list it twice.
++# Add the root pool to $KEEP according to its contents.
++# It's ok to list it twice.
+ if [[ -z $KEEP ]]; then
+-	export KEEP="^$(find_rpool)\$"
++	KEEP="$(find_rpool)"
+ else
+-	export KEEP="^$(echo $KEEP | sed 's/ /|$/')\$"
+-	KEEP+="|^$(find_rpool)\$"
++	KEEP+=" $(find_rpool)"
+ fi
+ 
++export __ZFS_POOL_EXCLUDE="$KEEP"
++export KEEP="^$(echo $KEEP | sed 's/ /$|^/g')\$"
++
+ [[ -z $runfile ]] && runfile=$(find_runfile)
+ [[ -z $runfile ]] && fail "Couldn't determine distro"
+ 
+-- 
+1.8.3.1
+

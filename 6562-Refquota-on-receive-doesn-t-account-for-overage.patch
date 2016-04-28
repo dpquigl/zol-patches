@@ -1,0 +1,293 @@
+From 5f7a8e6d750cb070a3347f045201c6206caee6aa Mon Sep 17 00:00:00 2001
+From: Dan McDonald <danmcd@omniti.com>
+Date: Thu, 7 Jan 2016 17:49:29 -0500
+Subject: [PATCH] 6562 Refquota on receive doesn't account for overage Reviewed
+ by: Matthew Ahrens <mahrens@delphix.com> Reviewed by: Yuri Pankov
+ <yuri.pankov@nexenta.com> Reviewed by: Toomas Soome <tsoome@me.com> Approved
+ by: Gordon Ross <gwr@nexenta.com>
+
+---
+ usr/src/pkg/manifests/system-test-zfstest.mf       |  5 +-
+ usr/src/test/zfs-tests/runfiles/delphix.run        |  3 +-
+ usr/src/test/zfs-tests/runfiles/omnios.run         |  3 +-
+ usr/src/test/zfs-tests/runfiles/openindiana.run    |  3 +-
+ .../tests/functional/cli_root/zfs_receive/Makefile |  4 +-
+ .../cli_root/zfs_receive/zfs_receive_012_pos.ksh   | 83 ++++++++++++++++++++++
+ module/zfs/dsl_dataset.c            | 31 +++++++-
+ 7 files changed, 124 insertions(+), 8 deletions(-)
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_012_pos.ksh
+
+diff --git a/usr/src/pkg/manifests/system-test-zfstest.mf b/usr/src/pkg/manifests/system-test-zfstest.mf
+index 0605ab6..6902c8d 100644
+--- a/usr/src/pkg/manifests/system-test-zfstest.mf
++++ b/usr/src/pkg/manifests/system-test-zfstest.mf
+@@ -11,8 +11,8 @@
+ 
+ #
+ # Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+-# Copyright 2014, OmniTI Computer Consulting, Inc. All rights reserved.
+ # Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
++# Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
+ #
+ 
+ set name=pkg.fmri value=pkg:/system/test/zfstest@$(PKGVERS)
+@@ -699,6 +699,9 @@ file \
+ file \
+     path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_011_pos \
+     mode=0555
++file \
++    path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_012_pos \
++    mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs_rename/cleanup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs_rename/setup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs_rename/zfs_rename.cfg \
+diff --git a/usr/src/test/zfs-tests/runfiles/delphix.run b/usr/src/test/zfs-tests/runfiles/delphix.run
+index 091fb22..8722a9f 100644
+--- a/usr/src/test/zfs-tests/runfiles/delphix.run
++++ b/usr/src/test/zfs-tests/runfiles/delphix.run
+@@ -11,6 +11,7 @@
+ 
+ #
+ # Copyright (c) 2012, 2015 by Delphix. All rights reserved.
++# Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
+ #
+ 
+ [DEFAULT]
+@@ -149,7 +150,7 @@ tests = ['zfs_written_property_001_pos']
+ tests = ['zfs_receive_001_pos', 'zfs_receive_002_pos', 'zfs_receive_003_pos',
+     'zfs_receive_005_neg', 'zfs_receive_006_pos',
+     'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg',
+-    'zfs_receive_010_pos', 'zfs_receive_011_pos']
++    'zfs_receive_010_pos', 'zfs_receive_011_pos', 'zfs_receive_012_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_rename]
+ tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos', 'zfs_rename_003_pos',
+diff --git a/usr/src/test/zfs-tests/runfiles/omnios.run b/usr/src/test/zfs-tests/runfiles/omnios.run
+index 4db1db3..4b394a1 100644
+--- a/usr/src/test/zfs-tests/runfiles/omnios.run
++++ b/usr/src/test/zfs-tests/runfiles/omnios.run
+@@ -11,6 +11,7 @@
+ 
+ #
+ # Copyright (c) 2013, 2015 by Delphix. All rights reserved.
++# Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
+ #
+ 
+ [DEFAULT]
+@@ -149,7 +150,7 @@ tests = ['zfs_written_property_001_pos']
+ tests = ['zfs_receive_001_pos', 'zfs_receive_002_pos', 'zfs_receive_003_pos',
+     'zfs_receive_005_neg', 'zfs_receive_006_pos',
+     'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg',
+-    'zfs_receive_010_pos', 'zfs_receive_011_pos']
++    'zfs_receive_010_pos', 'zfs_receive_011_pos', 'zfs_receive_012_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_rename]
+ tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos', 'zfs_rename_003_pos',
+diff --git a/usr/src/test/zfs-tests/runfiles/openindiana.run b/usr/src/test/zfs-tests/runfiles/openindiana.run
+index 091fb22..8722a9f 100644
+--- a/usr/src/test/zfs-tests/runfiles/openindiana.run
++++ b/usr/src/test/zfs-tests/runfiles/openindiana.run
+@@ -11,6 +11,7 @@
+ 
+ #
+ # Copyright (c) 2012, 2015 by Delphix. All rights reserved.
++# Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
+ #
+ 
+ [DEFAULT]
+@@ -149,7 +150,7 @@ tests = ['zfs_written_property_001_pos']
+ tests = ['zfs_receive_001_pos', 'zfs_receive_002_pos', 'zfs_receive_003_pos',
+     'zfs_receive_005_neg', 'zfs_receive_006_pos',
+     'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg',
+-    'zfs_receive_010_pos', 'zfs_receive_011_pos']
++    'zfs_receive_010_pos', 'zfs_receive_011_pos', 'zfs_receive_012_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_rename]
+ tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos', 'zfs_rename_003_pos',
+diff --git a/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile
+index 687371b..e5e0e8c 100644
+--- a/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile
++++ b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile
+@@ -11,6 +11,7 @@
+ 
+ #
+ # Copyright (c) 2012, 2015 by Delphix. All rights reserved.
++# Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
+ #
+ 
+ include $(SRC)/Makefile.master
+@@ -30,7 +31,8 @@ PROGS = cleanup \
+ 	zfs_receive_008_pos \
+ 	zfs_receive_009_neg \
+ 	zfs_receive_010_pos \
+-	zfs_receive_011_pos
++	zfs_receive_011_pos \
++	zfs_receive_012_pos
+ 
+ CMDS = $(PROGS:%=$(TESTDIR)/%)
+ $(CMDS) := FILEMODE = 0555
+diff --git a/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_012_pos.ksh b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_012_pos.ksh
+new file mode 100644
+index 0000000..af9f91e
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_012_pos.ksh
+@@ -0,0 +1,83 @@
++#!/bin/ksh -p
++#
++# CDDL HEADER START
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# DESCRIPTION:
++#	refquota, like regular quota, is loosely enforced.  A dataset
++#	can exceed its refquota by one transaction.  This loose enforcement
++#	used to cause problems upon receiving a datastream where its
++#	refquota is slightly exceeded.  This test confirms that we can
++#	successfully receive a slightly over refquota stream.
++#
++# STRATEGY:
++#	1. Create a filesystem.
++#	2. Set a refquota.
++#	3. Snapshot the filesystem.
++#	4. Send a replication stream to a new filesystem.
++#	5. On the original filesystem, fill it up to its quota.
++#	6. Snapshot the original filesystem again.
++#	7. Send an incremental stream to the same new filesystem.
++#
++
++verify_runnable "both"
++
++typeset streamfile=/var/tmp/streamfile.$$
++
++function cleanup
++{
++	log_must $RM $streamfile
++	log_must $ZFS destroy -rf $TESTPOOL/$TESTFS1
++	log_must $ZFS destroy -rf $TESTPOOL/$TESTFS2
++}
++
++log_assert "The allowable slight refquota overage is properly sent-and-" \
++	"received."
++log_onexit cleanup
++
++orig=$TESTPOOL/$TESTFS1
++dest=$TESTPOOL/$TESTFS2
++
++#	1. Create a filesystem.
++log_must $ZFS create $orig
++origdir=$(get_prop mountpoint $orig)
++
++#	2. Set a refquota.
++log_must $ZFS set refquota=50M $orig
++
++#	3. Snapshot the filesystem.
++log_must $ZFS snapshot $orig@1
++
++#	4. Send a replication stream to a new filesystem.
++log_must eval "$ZFS send -R $orig@1 > $streamfile"
++log_must eval "$ZFS recv $dest < $streamfile"
++
++#	5. On the original filesystem, fill it up to its quota.
++cat < /dev/urandom > $origdir/fill-it-up
++
++#	6. Snapshot the original filesystem again.
++log_must $ZFS snapshot $orig@2
++
++#	7. Send an incremental stream to the same new filesystem.
++log_must eval "$ZFS send -I 1 -R $orig@2 > $streamfile"
++log_must eval "$ZFS recv $dest < $streamfile"
++
++log_pass "Verified receiving a slightly-over-refquota stream succeeds."
+diff --git a/module/zfs/dsl_dataset.c b/module/zfs/dsl_dataset.c
+index 0605ccc..d8d5735 100644
+--- a/module/zfs/dsl_dataset.c
++++ b/module/zfs/dsl_dataset.c
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2014 RackTop Systems.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+  * Copyright (c) 2014 Integros [integros.com]
++ * Copyright 2016, OmniTI Computer Consulting, Inc. All rights reserved.
+  */
+ 
+ #include <sys/dmu_objset.h>
+@@ -78,6 +79,8 @@ int zfs_max_recordsize = 1 * 1024 * 1024;
+ 
+ extern inline dsl_dataset_phys_t *dsl_dataset_phys(dsl_dataset_t *ds);
+ 
++extern int spa_asize_inflation;
++
+ /*
+  * Figure out how much of this delta should be propogated to the dsl_dir
+  * layer.  If there's a refreservation, that space has already been
+@@ -2788,6 +2791,11 @@ int
+ dsl_dataset_clone_swap_check_impl(dsl_dataset_t *clone,
+     dsl_dataset_t *origin_head, boolean_t force, void *owner, dmu_tx_t *tx)
+ {
++	/*
++	 * "slack" factor for received datasets with refquota set on them.
++	 * See the bottom of this function for details on its use.
++	 */
++	uint64_t refquota_slack = DMU_MAX_ACCESS * spa_asize_inflation;
+ 	int64_t unused_refres_delta;
+ 
+ 	/* they should both be heads */
+@@ -2830,10 +2838,22 @@ dsl_dataset_clone_swap_check_impl(dsl_dataset_t *clone,
+ 	    dsl_dir_space_available(origin_head->ds_dir, NULL, 0, TRUE))
+ 		return (SET_ERROR(ENOSPC));
+ 
+-	/* clone can't be over the head's refquota */
++	/*
++	 * The clone can't be too much over the head's refquota.
++	 *
++	 * To ensure that the entire refquota can be used, we allow one
++	 * transaction to exceed the the refquota.  Therefore, this check
++	 * needs to also allow for the space referenced to be more than the
++	 * refquota.  The maximum amount of space that one transaction can use
++	 * on disk is DMU_MAX_ACCESS * spa_asize_inflation.  Allowing this
++	 * overage ensures that we are able to receive a filesystem that
++	 * exceeds the refquota on the source system.
++	 *
++	 * So that overage is the refquota_slack we use below.
++	 */
+ 	if (origin_head->ds_quota != 0 &&
+ 	    dsl_dataset_phys(clone)->ds_referenced_bytes >
+-	    origin_head->ds_quota)
++	    origin_head->ds_quota + refquota_slack)
+ 		return (SET_ERROR(EDQUOT));
+ 
+ 	return (0);
+@@ -2847,8 +2867,13 @@ dsl_dataset_clone_swap_sync_impl(dsl_dataset_t *clone,
+ 	int64_t unused_refres_delta;
+ 
+ 	ASSERT(clone->ds_reserved == 0);
++	/*
++	 * NOTE: On DEBUG kernels there could be a race between this and
++	 * the check function if spa_asize_inflation is adjusted...
++	 */
+ 	ASSERT(origin_head->ds_quota == 0 ||
+-	    dsl_dataset_phys(clone)->ds_unique_bytes <= origin_head->ds_quota);
++	    dsl_dataset_phys(clone)->ds_unique_bytes <= origin_head->ds_quota +
++	    DMU_MAX_ACCESS * spa_asize_inflation);
+ 	ASSERT3P(clone->ds_prev, ==, origin_head->ds_prev);
+ 
+ 	/*
+-- 
+1.8.3.1
+

@@ -1,0 +1,1153 @@
+From 1a902ef8628b0dffd6df5442354ab59bb8530962 Mon Sep 17 00:00:00 2001
+From: Hans Rosenfeld <hans.rosenfeld@nexenta.com>
+Date: Sat, 10 Jan 2015 21:16:37 +0100
+Subject: [PATCH] 5561 support root pools on EFI/GPT partitioned disks 5125
+ update zpool/libzfs to manage bootable whole disk pools (EFI/GPT labeled
+ disks) Reviewed by: Jean McCormack <jean.mccormack@nexenta.com> Reviewed by:
+ Josef 'Jeff' Sipek <josef.sipek@nexenta.com> Approved by: Dan McDonald
+ <danmcd@omniti.com>
+
+---
+ cmd/boot/bootadm/bootadm.c           |  34 +++--
+ cmd/boot/installgrub/Makefile        |   3 +-
+ cmd/boot/installgrub/installgrub.c   |  74 ++++++++--
+ cmd/boot/installgrub/installgrub.h   |   9 +-
+ usr/src/lib/libbe/Makefile.com               |   4 +-
+ usr/src/lib/libbe/common/be_activate.c       | 195 ++++++++++++++++++++-------
+ usr/src/lib/libgrubmgmt/common/libgrub_cmd.c |   5 +-
+ lib/libzfs/libzfs_pool.c      |  79 +----------
+ usr/src/man/man1m/boot.1m                    |  36 ++---
+ usr/src/man/man1m/installgrub.1m             |  13 +-
+ module/zfs/vdev.c             |   4 +-
+ 11 files changed, 263 insertions(+), 193 deletions(-)
+
+diff --git a/cmd/boot/bootadm/bootadm.c b/cmd/boot/bootadm/bootadm.c
+index c946672..454b266 100644
+--- a/cmd/boot/bootadm/bootadm.c
++++ b/cmd/boot/bootadm/bootadm.c
+@@ -24,7 +24,7 @@
+  */
+ 
+ /*
+- * Copyright 2014 Nexenta Systems, Inc. All rights reserved.
++ * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ /*
+@@ -116,6 +116,9 @@ typedef struct {
+ #define	ENTRY_INIT	-1	/* entryNum initial value */
+ #define	ALL_ENTRIES	-2	/* selects all boot entries */
+ 
++#define	PARTNO_NOTFOUND -1	/* Solaris partition not found */
++#define	PARTNO_EFI	-2	/* EFI partition table found */
++
+ #define	GRUB_DIR		"/boot/grub"
+ #define	GRUB_STAGE2		GRUB_DIR "/stage2"
+ #define	GRUB_MENU		"/boot/grub/menu.lst"
+@@ -4916,14 +4919,14 @@ create_diskmap(char *osroot)
+ static int
+ get_partition(char *device)
+ {
+-	int i, fd, is_pcfs, partno = -1;
++	int i, fd, is_pcfs, partno = PARTNO_NOTFOUND;
+ 	struct mboot *mboot;
+ 	char boot_sect[SECTOR_SIZE];
+ 	char *wholedisk, *slice;
+ #ifdef i386
+ 	ext_part_t *epp;
+ 	uint32_t secnum, numsec;
+-	int rval, pno, ext_partno = -1;
++	int rval, pno, ext_partno = PARTNO_NOTFOUND;
+ #endif
+ 
+ 	/* form whole disk (p0) */
+@@ -4979,6 +4982,11 @@ get_partition(char *device)
+ 				break;
+ 			}
+ 		} else {	/* look for solaris partition, old and new */
++			if (part->systid == EFI_PMBR) {
++				partno = PARTNO_EFI;
++				break;
++			}
++
+ #ifdef i386
+ 			if ((part->systid == SUNIXOS &&
+ 			    (fdisk_is_linux_swap(epp, part->relsect,
+@@ -4999,7 +5007,7 @@ get_partition(char *device)
+ 	}
+ #ifdef i386
+ 	/* If no primary solaris partition, check extended partition */
+-	if ((partno == -1) && (ext_partno != -1)) {
++	if ((partno == PARTNO_NOTFOUND) && (ext_partno != PARTNO_NOTFOUND)) {
+ 		rval = fdisk_get_solaris_part(epp, &pno, &secnum, &numsec);
+ 		if (rval == FDISK_SUCCESS) {
+ 			partno = pno - 1;
+@@ -5072,13 +5080,18 @@ get_grubroot(char *osroot, char *osdev, char *menu_root)
+ 	}
+ 
+ 	fdiskpart = get_partition(osdev);
+-	INJECT_ERROR1("GRUBROOT_FDISK_FAIL", fdiskpart = -1);
+-	if (fdiskpart == -1) {
++	INJECT_ERROR1("GRUBROOT_FDISK_FAIL", fdiskpart = PARTNO_NOTFOUND);
++	if (fdiskpart == PARTNO_NOTFOUND) {
+ 		bam_error(FDISKPART_FAIL, osdev);
+ 		return (NULL);
+ 	}
+ 
+ 	grubroot = s_calloc(1, 10);
++	if (fdiskpart == PARTNO_EFI) {
++		fdiskpart = atoi(&slice[1]);
++		slice = NULL;
++	}
++
+ 	if (slice) {
+ 		(void) snprintf(grubroot, 10, "(hd%s,%d,%c)",
+ 		    grubhd, fdiskpart, slice[1] + 'a' - '0');
+@@ -7103,8 +7116,8 @@ get_grubsign(char *osroot, char *osdev)
+ 		bam_print(GRUBSIGN_FOUND_OR_CREATED, sign, osdev);
+ 
+ 	fdiskpart = get_partition(osdev);
+-	INJECT_ERROR1("GET_GRUBSIGN_FDISK", fdiskpart = -1);
+-	if (fdiskpart == -1) {
++	INJECT_ERROR1("GET_GRUBSIGN_FDISK", fdiskpart = PARTNO_NOTFOUND);
++	if (fdiskpart == PARTNO_NOTFOUND) {
+ 		bam_error(FDISKPART_FAIL, osdev);
+ 		free(sign);
+ 		return (NULL);
+@@ -7112,6 +7125,11 @@ get_grubsign(char *osroot, char *osdev)
+ 
+ 	slice = strrchr(osdev, 's');
+ 
++	if (fdiskpart == PARTNO_EFI) {
++		fdiskpart = atoi(&slice[1]);
++		slice = NULL;
++	}
++
+ 	grubsign = s_calloc(1, MAXNAMELEN + 10);
+ 	if (slice) {
+ 		(void) snprintf(grubsign, MAXNAMELEN + 10, "(%s,%d,%c)",
+diff --git a/cmd/boot/installgrub/Makefile b/cmd/boot/installgrub/Makefile
+index 4cc69ec..aecf0f7 100644
+--- a/cmd/boot/installgrub/Makefile
++++ b/cmd/boot/installgrub/Makefile
+@@ -19,6 +19,7 @@
+ # CDDL HEADER END
+ #
+ # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
++# Copyright 2015, Nexenta Systems, Inc.
+ # 
+ 
+ PROG= installgrub
+@@ -45,7 +46,7 @@ LDLIBS += -lmd5
+ i386_CFLAGS += -D_LARGEFILE64_SOURCE
+ i386_CFLAGS += -D_FILE_OFFSET_BITS=64
+ 
+-LDLIBS += -lfdisk
++LDLIBS += -lfdisk -lefi -lfstyp
+ 
+ LINTFLAGS += \
+ 	-erroff=E_BAD_PTR_CAST_ALIGN \
+diff --git a/cmd/boot/installgrub/installgrub.c b/cmd/boot/installgrub/installgrub.c
+index c27dca8..4d29d02 100644
+--- a/cmd/boot/installgrub/installgrub.c
++++ b/cmd/boot/installgrub/installgrub.c
+@@ -21,7 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2012 Milan Jurik. All rights reserved.
+- * Copyright 2012 Nexenta Systems, Inc. All rights reserved.
++ * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ #include <stdio.h>
+@@ -48,6 +48,10 @@
+ #include <sys/stat.h>
+ #include <sys/multiboot.h>
+ #include <sys/sysmacros.h>
++#include <sys/efi_partition.h>
++
++#include <libnvpair.h>
++#include <libfstyp.h>
+ 
+ #include "message.h"
+ #include "installgrub.h"
+@@ -107,7 +111,7 @@ static void usage(char *);
+ static int read_stage1_from_file(char *, ig_data_t *);
+ static int read_stage2_from_file(char *, ig_data_t *);
+ static int read_stage1_from_disk(int, char *);
+-static int read_stage2_from_disk(int, ig_stage2_t *);
++static int read_stage2_from_disk(int, ig_stage2_t *, int);
+ static int prepare_stage1(ig_data_t *);
+ static int prepare_stage2(ig_data_t *, char *);
+ static void prepare_fake_multiboot(ig_stage2_t *);
+@@ -389,7 +393,7 @@ handle_getinfo(char *progname, char **argv)
+ 		goto out_dev;
+ 	}
+ 
+-	ret = read_stage2_from_disk(device->part_fd, stage2);
++	ret = read_stage2_from_disk(device->part_fd, stage2, device->type);
+ 	if (ret == BC_ERROR) {
+ 		(void) fprintf(stderr, gettext("Error reading stage2 from "
+ 		    "%s\n"), device_path);
+@@ -487,7 +491,8 @@ handle_mirror(char *progname, char **argv)
+ 		goto out_devs;
+ 	}
+ 
+-	ret = read_stage2_from_disk(curr_device->part_fd, stage2_curr);
++	ret = read_stage2_from_disk(curr_device->part_fd, stage2_curr,
++	    curr_device->type);
+ 	if (ret == BC_ERROR) {
+ 		BOOT_DEBUG("Error reading first stage2 blocks from %s\n",
+ 		    curr_device->path);
+@@ -623,6 +628,10 @@ propagate_bootblock(ig_data_t *source, ig_data_t *target, char *updt_str)
+ static int
+ init_device(ig_device_t *device, char *path)
+ {
++	struct dk_gpt *vtoc;
++	fstyp_handle_t fhdl;
++	const char *fident;
++
+ 	bzero(device, sizeof (*device));
+ 	device->part_fd = -1;
+ 	device->disk_fd = -1;
+@@ -655,9 +664,25 @@ init_device(ig_device_t *device, char *path)
+ 		return (BC_ERROR);
+ 	}
+ 
++	if (efi_alloc_and_read(device->disk_fd, &vtoc) > 0) {
++		device->type = IG_DEV_EFI;
++		efi_free(vtoc);
++	}
++
+ 	if (get_raw_partition_fd(device) != BC_SUCCESS)
+ 		return (BC_ERROR);
+ 
++	if (fstyp_init(device->part_fd, 0, NULL, &fhdl) != 0)
++		return (BC_ERROR);
++
++	if (fstyp_ident(fhdl, "zfs", &fident) != 0) {
++		fstyp_fini(fhdl);
++		(void) fprintf(stderr, gettext("Booting of EFI labeled disks "
++		    "is only supported with ZFS\n"));
++		return (BC_ERROR);
++	}
++	fstyp_fini(fhdl);
++
+ 	if (get_start_sector(device) != BC_SUCCESS)
+ 		return (BC_ERROR);
+ 
+@@ -701,6 +726,21 @@ get_start_sector(ig_device_t *device)
+ 	struct part_info	dkpi;
+ 	struct extpart_info	edkpi;
+ 
++	if (is_efi(device->type)) {
++		struct dk_gpt *vtoc;
++
++		if (efi_alloc_and_read(device->disk_fd, &vtoc) <= 0)
++			return (BC_ERROR);
++
++		device->start_sector = vtoc->efi_parts[device->slice].p_start;
++		/* GPT doesn't use traditional slice letters */
++		device->slice = 0xff;
++		device->partition = 0;
++
++		efi_free(vtoc);
++		goto found_part;
++	}
++
+ 	mboot = (struct mboot *)device->boot_sector;
+ 
+ 	if (is_bootpar(device->type)) {
+@@ -959,7 +999,8 @@ write_stage2(ig_data_t *install)
+ 	 * Note that we use stage2->buf rather than stage2->file, because we
+ 	 * may have extended information after the latter.
+ 	 */
+-	offset = STAGE2_BLKOFF * SECTOR_SIZE;
++	offset = STAGE2_BLKOFF(device->type) * SECTOR_SIZE;
++
+ 	if (write_out(device->part_fd, stage2->buf, stage2->buf_size,
+ 	    offset) != BC_SUCCESS) {
+ 		perror("write");
+@@ -968,7 +1009,7 @@ write_stage2(ig_data_t *install)
+ 
+ 	/* Simulate the "old" installgrub output. */
+ 	(void) fprintf(stdout, WRITE_STAGE2_DISK, device->partition,
+-	    (stage2->buf_size / SECTOR_SIZE) + 1, STAGE2_BLKOFF,
++	    (stage2->buf_size / SECTOR_SIZE) + 1, STAGE2_BLKOFF(device->type),
+ 	    stage2->first_sector);
+ 
+ 	return (BC_SUCCESS);
+@@ -1162,7 +1203,7 @@ read_stage1_from_disk(int dev_fd, char *stage1_buf)
+ }
+ 
+ static int
+-read_stage2_from_disk(int dev_fd, ig_stage2_t *stage2)
++read_stage2_from_disk(int dev_fd, ig_stage2_t *stage2, int type)
+ {
+ 	uint32_t		size;
+ 	uint32_t		buf_size;
+@@ -1173,7 +1214,7 @@ read_stage2_from_disk(int dev_fd, ig_stage2_t *stage2)
+ 	assert(dev_fd != -1);
+ 
+ 	if (read_in(dev_fd, mboot_scan, sizeof (mboot_scan),
+-	    STAGE2_BLKOFF * SECTOR_SIZE) != BC_SUCCESS) {
++	    STAGE2_BLKOFF(type) * SECTOR_SIZE) != BC_SUCCESS) {
+ 		perror(gettext("Error reading stage2 sectors"));
+ 		return (BC_ERROR);
+ 	}
+@@ -1209,7 +1250,7 @@ read_stage2_from_disk(int dev_fd, ig_stage2_t *stage2)
+ 	}
+ 	stage2->buf_size = buf_size;
+ 
+-	if (read_in(dev_fd, stage2->buf, buf_size, STAGE2_BLKOFF *
++	if (read_in(dev_fd, stage2->buf, buf_size, STAGE2_BLKOFF(type) *
+ 	    SECTOR_SIZE) != BC_SUCCESS) {
+ 		perror("read");
+ 		free(stage2->buf);
+@@ -1243,7 +1284,8 @@ is_update_necessary(ig_data_t *data, char *updt_str)
+ 	bzero(&stage2_disk, sizeof (ig_stage2_t));
+ 
+ 	/* Gather stage2 (if present) from the target device. */
+-	if (read_stage2_from_disk(dev_fd, &stage2_disk) != BC_SUCCESS) {
++	if (read_stage2_from_disk(dev_fd, &stage2_disk, device->type)
++	    != BC_SUCCESS) {
+ 		BOOT_DEBUG("Unable to read stage2 from %s\n", device->path);
+ 		BOOT_DEBUG("No multiboot wrapped stage2 on %s\n", device->path);
+ 		return (B_TRUE);
+@@ -1367,7 +1409,8 @@ prepare_stage2(ig_data_t *install, char *updt_str)
+ 		}
+ 	} else {
+ 		/* Solaris VTOC */
+-		stage2->first_sector = device->start_sector + STAGE2_BLKOFF;
++		stage2->first_sector = device->start_sector +
++		    STAGE2_BLKOFF(device->type);
+ 		BOOT_DEBUG("stage2 first sector: %d\n", stage2->first_sector);
+ 		/*
+ 		 * In a solaris partition, stage2 is written to contiguous
+@@ -1441,15 +1484,18 @@ get_raw_partition_path(ig_device_t *device)
+ 	}
+ 
+ 	len = strlen(raw);
+-	if (raw[len - 2] != 's' || raw[len - 1] == '2') {
++	if (!is_efi(device->type) &&
++	    (raw[len - 2] != 's' || raw[len - 1] == '2')) {
+ 		(void) fprintf(stderr, NOT_ROOT_SLICE);
+ 		free(raw);
+ 		return (NULL);
+ 	}
+ 	device->slice = atoi(&raw[len - 1]);
+ 
+-	raw[len - 2] = 's';
+-	raw[len - 1] = '2';
++	if (!is_efi(device->type)) {
++		raw[len - 2] = 's';
++		raw[len - 1] = '2';
++	}
+ 
+ 	return (raw);
+ }
+diff --git a/cmd/boot/installgrub/installgrub.h b/cmd/boot/installgrub/installgrub.h
+index af6e60b..037ffad 100644
+--- a/cmd/boot/installgrub/installgrub.h
++++ b/cmd/boot/installgrub/installgrub.h
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2012 Nexenta Systems, Inc. All rights reserved.
++ * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ #ifndef	_INSTALLGRUB_H
+@@ -68,10 +68,12 @@ typedef struct _ig_data {
+ 
+ enum ig_devtype_t {
+ 	IG_DEV_X86BOOTPAR = 1,
+-	IG_DEV_SOLVTOC
++	IG_DEV_SOLVTOC,
++	IG_DEV_EFI
+ };
+ 
+ #define	is_bootpar(type)	(type == IG_DEV_X86BOOTPAR)
++#define	is_efi(type)		(type == IG_DEV_EFI)
+ 
+ #define	STAGE2_MEMADDR		(0x8000)	/* loading addr of stage2 */
+ 
+@@ -86,7 +88,8 @@ enum ig_devtype_t {
+ #define	STAGE2_BLOCKLIST	(SECTOR_SIZE - 0x8)
+ #define	STAGE2_INSTALLPART	(SECTOR_SIZE + 0x8)
+ #define	STAGE2_FORCE_LBA	(SECTOR_SIZE + 0x11)
+-#define	STAGE2_BLKOFF		(50)	/* offset from start of fdisk part */
++#define	STAGE2_BLKOFF(type)	\
++	(is_efi(type) ? 1024 : 50)	/* offset from start of part */
+ 
+ #ifdef	__cplusplus
+ }
+diff --git a/usr/src/lib/libbe/Makefile.com b/usr/src/lib/libbe/Makefile.com
+index b71a0f8..bc04dd8 100644
+--- a/usr/src/lib/libbe/Makefile.com
++++ b/usr/src/lib/libbe/Makefile.com
+@@ -22,8 +22,8 @@
+ #
+ # Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
+ #
+-# Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+ # Copyright 2012 OmniTI Computer Consulting, Inc.  All rights reserved.
++# Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+ #
+ 
+ 
+@@ -50,7 +50,7 @@ INCS += -I$(SRCDIR)
+ 
+ C99MODE= 	$(C99_ENABLE)
+ 
+-LDLIBS +=	-lzfs -linstzones -luuid -lnvpair -lc -lgen -ldevinfo
++LDLIBS +=	-lzfs -linstzones -luuid -lnvpair -lc -lgen -ldevinfo -lefi
+ CPPFLAGS +=	$(INCS)
+ CERRWARN +=	-_gcc=-Wno-unused-label
+ CERRWARN +=	-_gcc=-Wno-uninitialized
+diff --git a/usr/src/lib/libbe/common/be_activate.c b/usr/src/lib/libbe/common/be_activate.c
+index 5b4555d..da6ed3f 100644
+--- a/usr/src/lib/libbe/common/be_activate.c
++++ b/usr/src/lib/libbe/common/be_activate.c
+@@ -24,7 +24,7 @@
+  */
+ 
+ /*
+- * Copyright 2013 Nexenta Systems, Inc. All rights reserved.
++ * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ #include <assert.h>
+@@ -34,11 +34,14 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <strings.h>
+ #include <errno.h>
+ #include <sys/mnttab.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <fcntl.h>
+ #include <unistd.h>
++#include <sys/efi_partition.h>
+ 
+ #include <libbe.h>
+ #include <libbe_priv.h>
+@@ -50,6 +53,9 @@ char	*mnttab = MNTTAB;
+  */
+ static int set_bootfs(char *boot_rpool, char *be_root_ds);
+ static int set_canmount(be_node_list_t *, char *);
++static boolean_t be_do_installgrub_mbr(char *, nvlist_t *);
++static int be_do_installgrub_helper(zpool_handle_t *, nvlist_t *, char *,
++    char *);
+ static int be_do_installgrub(be_transaction_data_t *);
+ static int be_get_grub_vers(be_transaction_data_t *, char **, char **);
+ static int get_ver_from_capfile(char *, char **);
+@@ -750,6 +756,136 @@ get_ver_from_capfile(char *file, char **vers)
+ }
+ 
+ /*
++ * To be able to boot EFI labeled disks, GRUB stage1 needs to be written
++ * into the MBR. We do not do this if we're on disks with a traditional
++ * fdisk partition table only, or if any foreign EFI partitions exist.
++ * In the trivial case of a whole-disk vdev we always write stage1 into
++ * the MBR.
++ */
++static boolean_t
++be_do_installgrub_mbr(char *diskname, nvlist_t *child)
++{
++	struct uuid allowed_uuids[] = {
++		EFI_UNUSED,
++		EFI_RESV1,
++		EFI_BOOT,
++		EFI_ROOT,
++		EFI_SWAP,
++		EFI_USR,
++		EFI_BACKUP,
++		EFI_RESV2,
++		EFI_VAR,
++		EFI_HOME,
++		EFI_ALTSCTR,
++		EFI_RESERVED,
++		EFI_SYSTEM,
++		EFI_BIOS_BOOT,
++		EFI_SYMC_PUB,
++		EFI_SYMC_CDS
++	};
++
++	uint64_t whole;
++	struct dk_gpt *gpt;
++	struct uuid *u;
++	int fd, npart, i, j;
++
++	(void) nvlist_lookup_uint64(child, ZPOOL_CONFIG_WHOLE_DISK,
++	    &whole);
++
++	if (whole)
++		return (B_TRUE);
++
++	if ((fd = open(diskname, O_RDONLY|O_NDELAY)) < 0)
++		return (B_FALSE);
++
++	if ((npart = efi_alloc_and_read(fd, &gpt)) <= 0)
++		return (B_FALSE);
++
++	for (i = 0; i != npart; i++) {
++		int match = 0;
++
++		u = &gpt->efi_parts[i].p_guid;
++
++		for (j = 0;
++		    j != sizeof (allowed_uuids) / sizeof (struct uuid);
++		    j++)
++			if (bcmp(u, &allowed_uuids[j],
++			    sizeof (struct uuid)) == 0)
++				match++;
++
++		if (match == 0)
++			return (B_FALSE);
++	}
++
++	return (B_TRUE);
++}
++
++static int
++be_do_installgrub_helper(zpool_handle_t *zphp, nvlist_t *child, char *stage1,
++    char *stage2)
++{
++	char installgrub_cmd[MAXPATHLEN];
++	char be_run_cmd_errbuf[BUFSIZ];
++	char diskname[MAXPATHLEN];
++	char *vname;
++	char *path, *dsk_ptr;
++	char *m_flag = "";
++
++	if (nvlist_lookup_string(child, ZPOOL_CONFIG_PATH, &path) != 0) {
++		be_print_err(gettext("be_do_installgrub: "
++		    "failed to get device path\n"));
++		return (BE_ERR_NODEV);
++	}
++
++	/*
++	 * Modify the vdev path to point to the raw disk.
++	 */
++	path = strdup(path);
++	if (path == NULL)
++		return (BE_ERR_NOMEM);
++
++	dsk_ptr = strstr(path, "/dsk/");
++	if (dsk_ptr != NULL) {
++		*dsk_ptr = '\0';
++		dsk_ptr++;
++	} else {
++		dsk_ptr = "";
++	}
++
++	(void) snprintf(diskname, sizeof (diskname), "%s/r%s", path, dsk_ptr);
++	free(path);
++
++	if (be_do_installgrub_mbr(diskname, child))
++		m_flag = "-m -f";
++
++	vname = zpool_vdev_name(g_zfs, zphp, child, B_FALSE);
++	if (vname == NULL) {
++		be_print_err(gettext("be_do_installgrub: "
++		    "failed to get device name: %s\n"),
++		    libzfs_error_description(g_zfs));
++		return (zfs_err_to_be_err(g_zfs));
++	}
++
++	(void) snprintf(installgrub_cmd, sizeof (installgrub_cmd),
++	    "%s %s %s %s %s", BE_INSTALL_GRUB, m_flag, stage1, stage2,
++	    diskname);
++	if (be_run_cmd(installgrub_cmd, be_run_cmd_errbuf, BUFSIZ, NULL, 0)
++	    != BE_SUCCESS) {
++		be_print_err(gettext("be_do_installgrub: installgrub "
++		    "failed for device %s.\n"), vname);
++		/* Assume localized cmd err output. */
++		be_print_err(gettext("  Command: \"%s\"\n"),
++		    installgrub_cmd);
++		be_print_err("%s", be_run_cmd_errbuf);
++		free(vname);
++		return (BE_ERR_BOOTFILE_INST);
++	}
++	free(vname);
++
++	return (BE_SUCCESS);
++}
++
++/*
+  * Function:	be_do_installgrub
+  * Description:	This function runs installgrub using the grub loader files
+  *              from the BE we're activating and installing them on the
+@@ -782,9 +918,7 @@ be_do_installgrub(be_transaction_data_t *bt)
+ 	char zpool_cap_file[MAXPATHLEN];
+ 	char stage1[MAXPATHLEN];
+ 	char stage2[MAXPATHLEN];
+-	char installgrub_cmd[MAXPATHLEN];
+ 	char *vname;
+-	char be_run_cmd_errbuf[BUFSIZ];
+ 	int ret = BE_SUCCESS;
+ 	int err = 0;
+ 	boolean_t be_mounted = B_FALSE;
+@@ -868,6 +1002,7 @@ be_do_installgrub(be_transaction_data_t *bt)
+ 			goto done;
+ 		}
+ 		if (strcmp(vname, "mirror") == 0 || vname[0] != 'c') {
++			free(vname);
+ 
+ 			if (nvlist_lookup_nvlist_array(child[c],
+ 			    ZPOOL_CONFIG_CHILDREN, &nvchild, &nchildren) != 0) {
+@@ -879,56 +1014,18 @@ be_do_installgrub(be_transaction_data_t *bt)
+ 			}
+ 
+ 			for (i = 0; i < nchildren; i++) {
+-				vname = zpool_vdev_name(g_zfs, zphp,
+-				    nvchild[i], B_FALSE);
+-				if (vname == NULL) {
+-					be_print_err(gettext(
+-					    "be_do_installgrub: "
+-					    "failed to get device name: %s\n"),
+-					    libzfs_error_description(g_zfs));
+-					ret = zfs_err_to_be_err(g_zfs);
++				ret = be_do_installgrub_helper(zphp, nvchild[i],
++				    stage1, stage2);
++				if (ret != BE_SUCCESS)
+ 					goto done;
+-				}
+-
+-				(void) snprintf(installgrub_cmd,
+-				    sizeof (installgrub_cmd),
+-				    "%s %s %s /dev/rdsk/%s",
+-				    BE_INSTALL_GRUB, stage1, stage2, vname);
+-				if (be_run_cmd(installgrub_cmd,
+-				    be_run_cmd_errbuf, BUFSIZ, NULL, 0) !=
+-				    BE_SUCCESS) {
+-					be_print_err(gettext(
+-					    "be_do_installgrub: installgrub "
+-					    "failed for device %s.\n"), vname);
+-					/* Assume localized cmd err output. */
+-					be_print_err(gettext(
+-					    "  Command: \"%s\"\n"),
+-					    installgrub_cmd);
+-					be_print_err("%s", be_run_cmd_errbuf);
+-					free(vname);
+-					ret = BE_ERR_BOOTFILE_INST;
+-					goto done;
+-				}
+-				free(vname);
+ 			}
+ 		} else {
+-			(void) snprintf(installgrub_cmd,
+-			    sizeof (installgrub_cmd), "%s %s %s /dev/rdsk/%s",
+-			    BE_INSTALL_GRUB, stage1, stage2, vname);
+-			if (be_run_cmd(installgrub_cmd, be_run_cmd_errbuf,
+-			    BUFSIZ, NULL, 0) != BE_SUCCESS) {
+-				be_print_err(gettext(
+-				    "be_do_installgrub: installgrub "
+-				    "failed for device %s.\n"), vname);
+-				/* Assume localized cmd err output. */
+-				be_print_err(gettext("  Command: \"%s\"\n"),
+-				    installgrub_cmd);
+-				be_print_err("%s", be_run_cmd_errbuf);
+-				free(vname);
+-				ret = BE_ERR_BOOTFILE_INST;
+-				goto done;
+-			}
+ 			free(vname);
++
++			ret = be_do_installgrub_helper(zphp, child[c], stage1,
++			    stage2);
++			if (ret != BE_SUCCESS)
++				goto done;
+ 		}
+ 	}
+ 
+diff --git a/usr/src/lib/libgrubmgmt/common/libgrub_cmd.c b/usr/src/lib/libgrubmgmt/common/libgrub_cmd.c
+index 85304d4..5dc1224 100644
+--- a/usr/src/lib/libgrubmgmt/common/libgrub_cmd.c
++++ b/usr/src/lib/libgrubmgmt/common/libgrub_cmd.c
+@@ -22,6 +22,9 @@
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
++/*
++ * Copyright 2015 Nexenta Systems, Inc.
++ */
+ 
+ /*
+  * This file contains all the functions that implement the following
+@@ -399,7 +402,7 @@ findroot(const grub_line_t *lp, grub_barg_t *barg)
+ 			return (EG_FINDROOTFMT);
+ 
+ 		++pos;
+-		if (pos[0] != ',' ||
++		if ((pos[0] != ',' && pos[0] != ')') ||
+ 		    !IS_SLCNUM_VALID(barg->gb_slcnum = pos[1]) ||
+ 		    pos[2] != ')')
+ 			return (EG_FINDROOTFMT);
+diff --git a/lib/libzfs/libzfs_pool.c b/lib/libzfs/libzfs_pool.c
+index 4f8d0b6..0418091 100644
+--- a/lib/libzfs/libzfs_pool.c
++++ b/lib/libzfs/libzfs_pool.c
+@@ -373,27 +373,6 @@ bootfs_name_valid(const char *pool, char *bootfs)
+ 	return (B_FALSE);
+ }
+ 
+-/*
+- * Inspect the configuration to determine if any of the devices contain
+- * an EFI label.
+- */
+-static boolean_t
+-pool_uses_efi(nvlist_t *config)
+-{
+-	nvlist_t **child;
+-	uint_t c, children;
+-
+-	if (nvlist_lookup_nvlist_array(config, ZPOOL_CONFIG_CHILDREN,
+-	    &child, &children) != 0)
+-		return (read_efi_label(config, NULL) >= 0);
+-
+-	for (c = 0; c < children; c++) {
+-		if (pool_uses_efi(child[c]))
+-			return (B_TRUE);
+-	}
+-	return (B_FALSE);
+-}
+-
+ boolean_t
+ zpool_is_bootable(zpool_handle_t *zhp)
+ {
+@@ -422,7 +401,6 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
+ 	char *slash, *check;
+ 	struct stat64 statbuf;
+ 	zpool_handle_t *zhp;
+-	nvlist_t *nvroot;
+ 
+ 	if (nvlist_alloc(&retprops, NV_UNIQUE_NAME, 0) != 0) {
+ 		(void) no_memory(hdl);
+@@ -541,21 +519,6 @@ zpool_valid_proplist(libzfs_handle_t *hdl, const char *poolname,
+ 				(void) zfs_error(hdl, EZFS_OPENFAILED, errbuf);
+ 				goto error;
+ 			}
+-			verify(nvlist_lookup_nvlist(zpool_get_config(zhp, NULL),
+-			    ZPOOL_CONFIG_VDEV_TREE, &nvroot) == 0);
+-
+-			/*
+-			 * bootfs property cannot be set on a disk which has
+-			 * been EFI labeled.
+-			 */
+-			if (pool_uses_efi(nvroot)) {
+-				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+-				    "property '%s' not supported on "
+-				    "EFI labeled devices"), propname);
+-				(void) zfs_error(hdl, EZFS_POOL_NOTSUP, errbuf);
+-				zpool_close(zhp);
+-				goto error;
+-			}
+ 			zpool_close(zhp);
+ 			break;
+ 
+@@ -1278,25 +1241,6 @@ zpool_add(zpool_handle_t *zhp, nvlist_t *nvroot)
+ 		return (zfs_error(hdl, EZFS_BADVERSION, msg));
+ 	}
+ 
+-	if (zpool_is_bootable(zhp) && nvlist_lookup_nvlist_array(nvroot,
+-	    ZPOOL_CONFIG_SPARES, &spares, &nspares) == 0) {
+-		uint64_t s;
+-
+-		for (s = 0; s < nspares; s++) {
+-			char *path;
+-
+-			if (nvlist_lookup_string(spares[s], ZPOOL_CONFIG_PATH,
+-			    &path) == 0 && pool_uses_efi(spares[s])) {
+-				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+-				    "device '%s' contains an EFI label and "
+-				    "cannot be used on root pools."),
+-				    zpool_vdev_name(hdl, NULL, spares[s],
+-				    B_FALSE));
+-				return (zfs_error(hdl, EZFS_POOL_NOTSUP, msg));
+-			}
+-		}
+-	}
+-
+ 	if (zpool_get_prop_int(zhp, ZPOOL_PROP_VERSION, NULL) <
+ 	    SPA_VERSION_L2CACHE &&
+ 	    nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_L2CACHE,
+@@ -2311,11 +2255,9 @@ zpool_get_config_physpath(nvlist_t *config, char *physpath, size_t phypath_size)
+ 		return (EZFS_INVALCONFIG);
+ 
+ 	/*
+-	 * root pool can not have EFI labeled disks and can only have
+-	 * a single top-level vdev.
++	 * root pool can only have a single top-level vdev.
+ 	 */
+-	if (strcmp(type, VDEV_TYPE_ROOT) != 0 || count != 1 ||
+-	    pool_uses_efi(vdev_root))
++	if (strcmp(type, VDEV_TYPE_ROOT) != 0 || count != 1)
+ 		return (EZFS_POOL_INVALARG);
+ 
+ 	(void) vdev_get_physpaths(child[0], physpath, phypath_size, &rsz,
+@@ -2617,16 +2559,6 @@ zpool_vdev_attach(zpool_handle_t *zhp,
+ 		(void) snprintf(msg, sizeof (msg), dgettext(TEXT_DOMAIN,
+ 		    "cannot attach %s to %s"), new_disk, old_disk);
+ 
+-	/*
+-	 * If this is a root pool, make sure that we're not attaching an
+-	 * EFI labeled device.
+-	 */
+-	if (rootpool && pool_uses_efi(nvroot)) {
+-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+-		    "EFI labeled devices are not supported on root pools."));
+-		return (zfs_error(hdl, EZFS_POOL_NOTSUP, msg));
+-	}
+-
+ 	(void) strlcpy(zc.zc_name, zhp->zpool_name, sizeof (zc.zc_name));
+ 	if ((tgt = zpool_find_vdev(zhp, old_disk, &avail_spare, &l2cache,
+ 	    &islog)) == 0)
+@@ -3902,13 +3834,6 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, char *name)
+ 	if (zhp) {
+ 		nvlist_t *nvroot;
+ 
+-		if (zpool_is_bootable(zhp)) {
+-			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+-			    "EFI labeled devices are not supported on root "
+-			    "pools."));
+-			return (zfs_error(hdl, EZFS_POOL_NOTSUP, errbuf));
+-		}
+-
+ 		verify(nvlist_lookup_nvlist(zhp->zpool_config,
+ 		    ZPOOL_CONFIG_VDEV_TREE, &nvroot) == 0);
+ 
+diff --git a/usr/src/man/man1m/boot.1m b/usr/src/man/man1m/boot.1m
+index deb21f1..07de722 100644
+--- a/usr/src/man/man1m/boot.1m
++++ b/usr/src/man/man1m/boot.1m
+@@ -1,10 +1,11 @@
+ '\" te
++.\" Copyright 2015 Nexenta Systems Inc.
+ .\" Copyright (c) 2008 Sun Microsystems, Inc. All Rights Reserved
+ .\" Copyright 1989 AT&T
+ .\" The contents of this file are subject to the terms of the Common Development and Distribution License (the "License"). You may not use this file except in compliance with the License. You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE or http://www.opensolaris.org/os/licensing.
+ .\" See the License for the specific language governing permissions and limitations under the License. When distributing Covered Code, include this CDDL HEADER in each file and include the License file at usr/src/OPENSOLARIS.LICENSE. If applicable, add the following below this CDDL HEADER, with the
+ .\" fields enclosed by brackets "[]" replaced with your own identifying information: Portions Copyright [yyyy] [name of copyright owner]
+-.TH BOOT 1M "Mar 2, 2009"
++.TH BOOT 1M "Jan 14, 2015"
+ .SH NAME
+ boot \- start the system kernel or a standalone program
+ .SH SYNOPSIS
+@@ -23,7 +24,6 @@ boot \- start the system kernel or a standalone program
+ .fi
+ 
+ .SH DESCRIPTION
+-.sp
+ .LP
+ Bootstrapping is the process of loading and executing a standalone program. For
+ the purpose of this discussion, bootstrapping means the process of loading and
+@@ -44,7 +44,6 @@ Once the kernel is loaded, it starts the UNIX system, mounts the necessary file
+ systems (see \fBvfstab\fR(4)), and runs \fB/sbin/init\fR to bring the system to
+ the "initdefault" state specified in \fB/etc/inittab\fR. See \fBinittab\fR(4).
+ .SS "SPARC Bootstrap Procedure"
+-.sp
+ .LP
+ On SPARC based systems, the bootstrap procedure on most machines consists of
+ the following basic phases.
+@@ -424,7 +423,6 @@ of the \fB-o\fR options, subject to the OBP limit of 128 bytes for boot
+ arguments. For example, \fB-o\fR \fBlist,go\fR would simply list current
+ (default) values of the parameters and then continue booting.
+ .SS "iSCSI Boot"
+-.sp
+ .LP
+ iSCSI boot is currently supported only on x86. The host being booted must be
+ equipped with NIC(s) capable of iBFT (iSCSI Boot Firmware Table) or have the
+@@ -441,7 +439,6 @@ of the process of iSCSI booting is the same as booting from a local disk.
+ To configure the iBFT properly, users need to refer to the documentation from
+ their hardware vendors.
+ .SS "Booting from Disk"
+-.sp
+ .LP
+ When booting from disk, the OpenBoot PROM firmware reads the boot blocks from
+ blocks 1 to 15 of the partition specified as the boot device. This standalone
+@@ -473,7 +470,6 @@ system and the capabilities of the hardware and firmware.
+ .LP
+ The path to the kernel must not contain any whitespace.
+ .SS "Booting from ZFS"
+-.sp
+ .LP
+ Booting from ZFS differs from booting from UFS in that, with ZFS, a device
+ specifier identifies a storage pool, not a single root file system. A storage
+@@ -485,7 +481,6 @@ the one identified by the pool's \fBbootfs\fR property. This default selection
+ can be overridden by specifying an alternate bootable dataset with the \fB-Z\fR
+ option.
+ .SS "Boot Archive Phase"
+-.sp
+ .LP
+ The boot archive contains a file system image that is mounted using an
+ in-memory disk. The image is self-describing, specifically containing a file
+@@ -512,7 +507,6 @@ modules from the in-memory filesystem until I/O can be turned on and the root
+ filesystem mounted. Once the root filesystem is mounted, the in-memory
+ filesystem is no longer needed and is discarded.
+ .SS "OpenBoot PROM \fBboot\fR Command Behavior"
+-.sp
+ .LP
+ The OpenBoot \fBboot\fR command takes arguments of the following form:
+ .sp
+@@ -931,7 +925,6 @@ using infinite retries.
+ attempted before the DHCP process is determined to have failed. Defaults to of
+ using infinite retries.
+ .SS "x86 Bootstrap Procedure"
+-.sp
+ .LP
+ On x86 based systems, the bootstrapping process consists of two conceptually
+ distinct phases, kernel loading and kernel initialization. Kernel loading is
+@@ -970,7 +963,6 @@ the root file system on the real root device. At this point, the kernel regains
+ storage I/O, mounts additional file systems (see \fBvfstab\fR(4)), and starts
+ various operating system services (see \fBsmf\fR(5)).
+ .SS "Failsafe Mode"
+-.sp
+ .LP
+ A requirement of booting from a root filesystem image built into a boot archive
+ then remounting root onto the actual root device is that the contents of the
+@@ -1030,14 +1022,12 @@ service, the administrator may elect to rebuild the archive by invoking:
+ .sp
+ 
+ .SS "Failsafe Boot Archive"
+-.sp
+ .LP
+ The failsafe archive can be used to boot the machine at any time for
+ maintenance or troubleshooting. The failsafe boot archive is installed on the
+ machine, sourced from the miniroot archive. Booting the failsafe archive causes
+ the machine to boot using the in-memory filesystem as the root device.
+ .SS "SPARC"
+-.sp
+ .LP
+ The SPARC failsafe archive is:
+ .sp
+@@ -1072,7 +1062,6 @@ ok \fBboot [\fIdevice-specifier\fR] -Z \fIdataset\fR -F failsafe\fR
+ .sp
+ 
+ .SS "x86"
+-.sp
+ .LP
+ The x86 failsafe archive is:
+ .sp
+@@ -1089,7 +1078,6 @@ The x86 failsafe archive is:
+ GRUB menu.
+ .SH OPTIONS
+ .SS "SPARC"
+-.sp
+ .LP
+ The following SPARC options are supported:
+ .sp
+@@ -1214,7 +1202,6 @@ Boot from the root file system in the specified ZFS dataset.
+ .RE
+ 
+ .SS "x86"
+-.sp
+ .LP
+ The following x86 options are supported:
+ .sp
+@@ -1267,7 +1254,6 @@ the machine.
+ .RE
+ 
+ .SH X86 BOOT SEQUENCE DETAILS
+-.sp
+ .LP
+ After a PC-compatible machine is turned on, the system firmware in the \fBBIOS
+ ROM\fR executes a power-on self test (POST), runs \fBBIOS\fR extensions in
+@@ -1277,7 +1263,6 @@ consists of trying to read the first physical sector from the first diskette
+ drive, or, if that fails, from the first hard disk. The processor then jumps to
+ the first byte of the sector image in memory.
+ .SH X86 PRIMARY BOOT
+-.sp
+ .LP
+ The first sector on a floppy disk contains the master boot block (GRUB
+ \fBstage1\fR). The stage 1 is responsible for loading GRUB \fBstage2\fR. Now
+@@ -1295,7 +1280,7 @@ program that maintains it. The master boot finds the active partition in the
+ first byte in memory. This completes the standard PC-compatible hard disk boot
+ sequence. If GRUB \fBstage1\fR is installed on the master boot block (see the
+ \fB-m\fR option of \fBinstallgrub\fR(1M)), then \fBstage2\fR is loaded directly
+-from the Solaris \fBFDISK\fR partition regardless of the active partition.
++from the Solaris partition regardless of the active partition.
+ .sp
+ .LP
+ An x86 \fBFDISK\fR partition for the Solaris software begins with a
+@@ -1312,6 +1297,13 @@ GRUB menu is displayed, the user can choose to boot an operating system on a
+ different partition, a different disk, or possibly from the network.
+ .sp
+ .LP
++The behavior is slightly different when a disk is using \fBEFI\fR
++partitioning. In that case the GRUB \fBstage1\fR is always installed
++in the first sector of the disk, and it always loads \fBstage2\fR from
++the partition specified at GRUB installation time. This only works on
++partitions containing a ZFS root pool.
++.sp
++.LP
+ For network booting, the supported method is Intel's Preboot eXecution
+ Environment (PXE) standard. When booting from the network using PXE, the system
+ or network adapter BIOS uses DHCP to locate a network bootstrap program
+@@ -1320,7 +1312,6 @@ Protocol (TFTP). The BIOS executes the \fBpxegrub\fR by jumping to its first
+ byte in memory. The \fBpxegrub\fR program downloads a menu file and presents
+ the entries to user.
+ .SH X86 KERNEL STARTUP
+-.sp
+ .LP
+ The kernel startup process is independent of the kernel loading process. During
+ kernel startup, console I/O goes to the device specified by the \fBconsole\fR
+@@ -1486,7 +1477,6 @@ to \fB/boot/grub/menu.lst\fR, and use the \fBset-menu\fR subcommand of
+ \fBbootadm set-menu\fR.
+ 
+ .SH FILES
+-.sp
+ .ne 2
+ .na
+ \fB\fB/platform/\fR\fIplatform-name\fR\fB/ufsboot\fR\fR
+@@ -1517,7 +1507,6 @@ Program that brings the system to the \fBinitdefault\fR state
+ .RE
+ 
+ .SS "64-bit SPARC Only"
+-.sp
+ .ne 2
+ .na
+ \fB\fB/platform/\fR\fIplatform-name\fR\fB/kernel/sparcv9/unix\fR\fR
+@@ -1528,7 +1517,6 @@ Default program to boot system.
+ .RE
+ 
+ .SS "x86 Only"
+-.sp
+ .ne 2
+ .na
+ \fB\fB/boot\fR\fR
+@@ -1559,7 +1547,6 @@ Menu of bootable operating systems displayed by GRUB.
+ .RE
+ 
+ .SS "64-bit x86 Only"
+-.sp
+ .ne 2
+ .na
+ \fB\fB/platform/i86pc/kernel/amd64/unix\fR\fR
+@@ -1570,7 +1557,6 @@ Menu of bootable operating systems displayed by GRUB.
+ .RE
+ 
+ .SH SEE ALSO
+-.sp
+ .LP
+ \fBkmdb\fR(1), \fBuname\fR(1), \fBbootadm\fR(1M), \fBeeprom\fR(1M),
+ \fBinit\fR(1M), \fBinstallboot\fR(1M), \fBkernel\fR(1M), \fBmonitor\fR(1M),
+@@ -1603,14 +1589,12 @@ RFC 2396, \fIUniform Resource Identifiers (URI): Generic Syntax\fR,
+ .LP
+ \fIOpenBoot Command Reference Manual\fR
+ .SH WARNINGS
+-.sp
+ .LP
+ The \fBboot\fR utility is unable to determine which files can be used as
+ bootable programs. If the booting of a file that is not bootable is requested,
+ the \fBboot\fR utility loads it and branches to it. What happens after that is
+ unpredictable.
+ .SH NOTES
+-.sp
+ .LP
+ \fIplatform-name\fR can be found using the \fB-i\fR option of \fBuname\fR(1).
+ \fIhardware-class-name\fR can be found using the \fB-m\fR option of
+diff --git a/usr/src/man/man1m/installgrub.1m b/usr/src/man/man1m/installgrub.1m
+index 57aaab8..b6d6497 100644
+--- a/usr/src/man/man1m/installgrub.1m
++++ b/usr/src/man/man1m/installgrub.1m
+@@ -1,9 +1,10 @@
+ '\" te
++.\" Copyright 2015 Nexenta Systems Inc.
+ .\" Copyright (c) 2008, Sun Microsystems, Inc. All Rights Reserved
+ .\" The contents of this file are subject to the terms of the Common Development and Distribution License (the "License").  You may not use this file except in compliance with the License. You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE or http://www.opensolaris.org/os/licensing.
+ .\"  See the License for the specific language governing permissions and limitations under the License. When distributing Covered Code, include this CDDL HEADER in each file and include the License file at usr/src/OPENSOLARIS.LICENSE.  If applicable, add the following below this CDDL HEADER, with
+ .\" the fields enclosed by brackets "[]" replaced with your own identifying information: Portions Copyright [yyyy] [name of copyright owner]
+-.TH INSTALLGRUB 1M "Jul 2, 2009"
++.TH INSTALLGRUB 1M "Jan 14, 2015"
+ .SH NAME
+ installgrub \- install GRUB in a disk partition or a floppy
+ .SH SYNOPSIS
+@@ -13,7 +14,6 @@ installgrub \- install GRUB in a disk partition or a floppy
+ .fi
+ 
+ .SH DESCRIPTION
+-.sp
+ .LP
+ The \fBinstallgrub\fR command is an x86-only program. GRUB stands for GRand
+ Unified Bootloader.
+@@ -23,7 +23,6 @@ Unified Bootloader.
+ disk partition. If you specify the \fB-m\fR option, \fBinstallgrub\fR installs
+ the stage 1 file on the master boot sector of the disk.
+ .SH OPTIONS
+-.sp
+ .LP
+ The \fBinstallgrub\fR command accepts the following options:
+ .sp
+@@ -42,11 +41,11 @@ Suppresses interaction when overwriting the master boot sector.
+ .ad
+ .RS 6n
+ Installs GRUB \fIstage1\fR on the master boot sector interactively. You must
+-use this option if Solaris is installed on an extended partition.
++use this option if Solaris is installed on an extended FDISK or an EFI/GPT
++partition.
+ .RE
+ 
+ .SH OPERANDS
+-.sp
+ .LP
+ The \fBinstallgrub\fR command accepts the following operands:
+ .sp
+@@ -114,7 +113,6 @@ example# mount -F pcfs /dev/diskette /mnt
+ .in -2
+ 
+ .SH FILES
+-.sp
+ .ne 2
+ .na
+ \fB\fB/boot/grub\fR\fR
+@@ -124,7 +122,6 @@ Directory where GRUB files reside.
+ .RE
+ 
+ .SH ATTRIBUTES
+-.sp
+ .LP
+ See \fBattributes\fR(5) for descriptions of the following attributes:
+ .sp
+@@ -140,12 +137,10 @@ Interface Stability	Uncommitted
+ .TE
+ 
+ .SH SEE ALSO
+-.sp
+ .LP
+ \fBboot\fR(1M), \fBfdisk\fR(1M), \fBfmthard\fR(1M), \fBkernel\fR(1M),
+ \fBattributes\fR(5)
+ .SH WARNINGS
+-.sp
+ .LP
+ Installing GRUB on the master boot sector (\fB-m\fR option) overrides any boot
+ manager currently installed on the machine. The system will always boot the
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index 6ee2a91..9bc46ce 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -21,8 +21,8 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #include <sys/zfs_context.h>
+@@ -3204,8 +3204,6 @@ vdev_is_bootable(vdev_t *vd)
+ 		    strcmp(vdev_type, VDEV_TYPE_MISSING) == 0) {
+ 			return (B_FALSE);
+ 		}
+-	} else if (vd->vdev_wholedisk == 1) {
+-		return (B_FALSE);
+ 	}
+ 
+ 	for (int c = 0; c < vd->vdev_children; c++) {
+-- 
+1.8.3.1
+

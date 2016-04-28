@@ -1,0 +1,4345 @@
+From 1ed6b69a5ca1ca3ee5e9a4931f74e2237c7e1c9f Mon Sep 17 00:00:00 2001
+From: Gordon Ross <gwr@nexenta.com>
+Date: Sun, 16 Dec 2012 22:41:29 -0500
+Subject: [PATCH] 5316 allow smbadm join to use RPC Reviewed by: Bayard Bell
+ <bayard.bell@nexenta.com> Reviewed by: Dan McDonald <danmcd@nexenta.com>
+ Reviewed by: Thomas Keiser <thomas.keiser@nexenta.com> Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ cmd/idmap/idmapd/idmap_config.c           |  16 +-
+ cmd/idmap/idmapd/idmap_config.h           |   3 +-
+ cmd/idmap/idmapd/init.c                   |  17 +-
+ cmd/smbsrv/smbadm/smbadm.c                | 142 ++++----
+ cmd/smbsrv/smbd/smbd_join.c               | 242 +++---------
+ cmd/zfs/zfs_main.c                        |  15 +-
+ usr/src/lib/libidmap/common/idmap.h               |   3 +
+ usr/src/lib/libidmap/common/idmap_api.c           |   2 +-
+ usr/src/lib/libidmap/common/mapfile-vers          |   1 +
+ lib/libzfs/libzfs_dataset.c        |  52 ++-
+ usr/src/lib/pysolaris/common/misc.c               |  35 +-
+ usr/src/lib/smbsrv/libmlsvc/common/lsar_clnt.c    |  19 +-
+ usr/src/lib/smbsrv/libmlsvc/common/mlsvc.h        |   2 +
+ usr/src/lib/smbsrv/libmlsvc/common/mlsvc_client.c | 195 +---------
+ usr/src/lib/smbsrv/libmlsvc/common/mlsvc_domain.c |  25 +-
+ usr/src/lib/smbsrv/libmlsvc/common/mlsvc_init.c   |   5 +-
+ usr/src/lib/smbsrv/libmlsvc/common/mlsvc_util.c   | 298 ++++++++++++---
+ usr/src/lib/smbsrv/libmlsvc/common/netr_auth.c    |  16 +-
+ usr/src/lib/smbsrv/libmlsvc/common/samlib.c       | 425 ++++++++++------------
+ usr/src/lib/smbsrv/libmlsvc/common/samlib.h       |  48 ++-
+ usr/src/lib/smbsrv/libmlsvc/common/samr_clnt.c    | 335 +++++++----------
+ usr/src/lib/smbsrv/libmlsvc/common/samr_svc.c     |  11 +-
+ usr/src/lib/smbsrv/libmlsvc/common/smbrdr_glue.c  |  34 +-
+ usr/src/lib/smbsrv/libsmb/Makefile.com            |   6 +-
+ usr/src/lib/smbsrv/libsmb/common/libsmb.h         |   7 +-
+ usr/src/lib/smbsrv/libsmb/common/mapfile-vers     |   3 +
+ usr/src/lib/smbsrv/libsmb/common/smb_auth.c       | 247 +++----------
+ usr/src/lib/smbsrv/libsmb/common/smb_cfg.c        |  26 ++
+ usr/src/lib/smbsrv/libsmb/common/smb_crypt.c      | 124 ++++++-
+ usr/src/lib/smbsrv/libsmb/common/smb_util.c       |  25 +-
+ usr/src/lib/smbsrv/libsmbns/Makefile.com          |   3 +-
+ usr/src/lib/smbsrv/libsmbns/common/libsmbns.h     |   3 +-
+ usr/src/lib/smbsrv/libsmbns/common/smbns_ads.c    |  63 +---
+ usr/src/uts/common/smbsrv/ndl/netlogon.ndl        |  45 ++-
+ usr/src/uts/common/smbsrv/ndl/samrpc.ndl          | 324 ++++++++---------
+ 35 files changed, 1304 insertions(+), 1513 deletions(-)
+
+diff --git a/cmd/idmap/idmapd/idmap_config.c b/cmd/idmap/idmapd/idmap_config.c
+index 02ae802..b8c2867 100644
+--- a/cmd/idmap/idmapd/idmap_config.c
++++ b/cmd/idmap/idmapd/idmap_config.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ 
+@@ -1455,6 +1455,11 @@ idmap_cfg_load_smf(idmap_cfg_handles_t *handles, idmap_pg_config_t *pgcfg,
+ 	if (rc != 0)
+ 		(*errors)++;
+ 
++	rc = get_val_bool(handles, "use_ads",
++	    &pgcfg->use_ads, B_TRUE);
++	if (rc != 0)
++		(*errors)++;
++
+ 	rc = get_val_bool(handles, "use_lsa",
+ 	    &pgcfg->use_lsa, B_TRUE);
+ 	if (rc != 0)
+@@ -1797,6 +1802,12 @@ idmap_cfg_discover(idmap_cfg_handles_t *handles, idmap_pg_config_t *pgcfg)
+ {
+ 	ad_disc_t ad_ctx = handles->ad_ctx;
+ 
++	if (pgcfg->use_ads == B_FALSE) {
++		if (DBG(CONFIG, 1))
++			idmapdlog(LOG_DEBUG, "ADS disabled.");
++		return;
++	}
++
+ 	if (DBG(CONFIG, 1))
+ 		idmapdlog(LOG_DEBUG, "Running discovery.");
+ 
+@@ -1916,6 +1927,9 @@ idmap_cfg_load(idmap_cfg_t *cfg, int flags)
+ 	changed += update_bool(&live_pgcfg->eph_map_unres_sids,
+ 	    &new_pgcfg.eph_map_unres_sids, "unresolvable_sid_mapping");
+ 
++	changed += update_bool(&live_pgcfg->use_ads,
++	    &new_pgcfg.use_ads, "use_ads");
++
+ 	changed += update_bool(&live_pgcfg->use_lsa,
+ 	    &new_pgcfg.use_lsa, "use_lsa");
+ 
+diff --git a/cmd/idmap/idmapd/idmap_config.h b/cmd/idmap/idmapd/idmap_config.h
+index 66e5431..31ae7b6 100644
+--- a/cmd/idmap/idmapd/idmap_config.h
++++ b/cmd/idmap/idmapd/idmap_config.h
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef _IDMAP_CONFIG_H
+@@ -108,6 +108,7 @@ typedef struct idmap_pg_config {
+ 	char		*nldap_winname_attr;
+ 	int		directory_based_mapping;	/* enum */
+ 	boolean_t	eph_map_unres_sids;
++	boolean_t	use_ads;
+ 	boolean_t	use_lsa;
+ 	boolean_t	disable_cross_forest_trusts;
+ } idmap_pg_config_t;
+diff --git a/cmd/idmap/idmapd/init.c b/cmd/idmap/idmapd/init.c
+index 43c18b6..3e5dde7 100644
+--- a/cmd/idmap/idmapd/init.c
++++ b/cmd/idmap/idmapd/init.c
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -119,8 +120,12 @@ reload_gcs()
+ 	int		num_trustfor = pgcfg->num_trusted_forests;
+ 	ad_disc_domainsinforest_t *domain_in_forest;
+ 
+-	if (pgcfg->domain_name == NULL) {
+-		/* No domain name specified - workgroup mode. */
++	if (pgcfg->use_ads == B_FALSE ||
++	    pgcfg->domain_name == NULL) {
++		/*
++		 * ADS disabled, or no domain name specified.
++		 * Not using adutils. (but still can use lsa)
++		 */
+ 		new_gcs = NULL;
+ 		new_num_gcs = 0;
+ 		goto out;
+@@ -248,8 +253,12 @@ reload_dcs(void)
+ 	int		old_num_dcs = _idmapdstate.num_dcs;
+ 	idmap_pg_config_t *pgcfg = &_idmapdstate.cfg->pgcfg;
+ 
+-	if (pgcfg->domain_name == NULL) {
+-		/* No domain name specified - workgroup mode. */
++	if (pgcfg->use_ads == B_FALSE ||
++	    pgcfg->domain_name == NULL) {
++		/*
++		 * ADS disabled, or no domain name specified.
++		 * Not using adutils. (but still can use lsa)
++		 */
+ 		new_dcs = NULL;
+ 		new_num_dcs = 0;
+ 		goto out;
+diff --git a/cmd/smbsrv/smbadm/smbadm.c b/cmd/smbsrv/smbadm/smbadm.c
+index 7874a71..07887fa 100644
+--- a/cmd/smbsrv/smbadm/smbadm.c
++++ b/cmd/smbsrv/smbadm/smbadm.c
+@@ -19,8 +19,8 @@
+  * CDDL HEADER END
+  */
+ /*
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -229,8 +229,14 @@ smbadm_cmdusage(FILE *fp, smbadm_cmdinfo_t *cmd)
+ 		return;
+ 
+ 	case HELP_JOIN:
++#if 0	/* Don't document "-p" yet, still needs work (NX 11960) */
++		(void) fprintf(fp, gettext("\t%s -p domain\n"
++		    "\t%s -u username domain\n\t%s -w workgroup\n"),
++		    cmd->name, cmd->name, cmd->name);
++#else
+ 		(void) fprintf(fp, gettext("\t%s -u username domain\n"
+ 		    "\t%s -w workgroup\n"), cmd->name, cmd->name);
++#endif
+ 		return;
+ 
+ 	case HELP_LIST:
+@@ -457,45 +463,25 @@ smbadm_join(int argc, char **argv)
+ 	uint32_t mode = 0;
+ 	char option;
+ 
+-	while ((option = getopt(argc, argv, "u:w:")) != -1) {
++	while ((option = getopt(argc, argv, "pu:w")) != -1) {
++		if (mode != 0) {
++			(void) fprintf(stderr, gettext(
++			    "join options are mutually exclusive\n"));
++			smbadm_usage(B_FALSE);
++		}
+ 		switch (option) {
+-		case 'w':
+-			if (mode != 0) {
+-				(void) fprintf(stderr,
+-				    gettext("-u and -w must only appear "
+-				    "once and are mutually exclusive\n"));
+-				smbadm_usage(B_FALSE);
+-			}
+-
+-			mode = SMB_SECMODE_WORKGRP;
+-			domain = optarg;
++		case 'p':
++			mode = SMB_SECMODE_DOMAIN;
++			/* leave username = NULL */
+ 			break;
+ 
+ 		case 'u':
+-			if (mode != 0) {
+-				(void) fprintf(stderr,
+-				    gettext("-u and -w must only appear "
+-				    "once and are mutually exclusive\n"));
+-				smbadm_usage(B_FALSE);
+-			}
+-
+ 			mode = SMB_SECMODE_DOMAIN;
+ 			username = optarg;
++			break;
+ 
+-			if ((domain = argv[optind]) == NULL) {
+-				/*
+-				 * The domain was not specified as a separate
+-				 * argument, check for the combination forms.
+-				 */
+-				(void) strlcpy(buf, username, sizeof (buf));
+-				smbadm_extract_domain(buf, &username, &domain);
+-			}
+-
+-			if ((username == NULL) || (*username == '\0')) {
+-				(void) fprintf(stderr,
+-				    gettext("missing username\n"));
+-				smbadm_usage(B_FALSE);
+-			}
++		case 'w':
++			mode = SMB_SECMODE_WORKGRP;
+ 			break;
+ 
+ 		default:
+@@ -504,16 +490,28 @@ smbadm_join(int argc, char **argv)
+ 		}
+ 	}
+ 
++	if (optind < argc)
++		domain = argv[optind];
++
++	if (username != NULL && domain == NULL) {
++		/*
++		 * The domain was not specified as a separate
++		 * argument, check for the combination forms.
++		 */
++		(void) strlcpy(buf, username, sizeof (buf));
++		smbadm_extract_domain(buf, &username, &domain);
++	}
++
+ 	if ((domain == NULL) || (*domain == '\0')) {
+ 		(void) fprintf(stderr, gettext("missing %s name\n"),
+ 		    (mode == SMB_SECMODE_WORKGRP) ? "workgroup" : "domain");
+ 		smbadm_usage(B_FALSE);
+ 	}
+ 
+-	if (mode == SMB_SECMODE_WORKGRP)
++	if (mode == SMB_SECMODE_WORKGRP) {
+ 		return (smbadm_join_workgroup(domain));
+-	else
+-		return (smbadm_join_domain(domain, username));
++	}
++	return (smbadm_join_domain(domain, username));
+ }
+ 
+ /*
+@@ -582,37 +580,46 @@ smbadm_join_domain(const char *domain, const char *username)
+ 	if (!smbadm_join_prompt(jdi.domain_name))
+ 		return (0);
+ 
+-	if ((p = strchr(username, '+')) != NULL) {
+-		++p;
+-
+-		len = (int)(p - username);
+-		if (len > sizeof (jdi.domain_name))
+-			len = sizeof (jdi.domain_name);
+-
+-		(void) strlcpy(jdi.domain_username, username, len);
+-		(void) strlcpy(jdi.domain_passwd, p,
+-		    sizeof (jdi.domain_passwd));
+-	} else {
+-		(void) strlcpy(jdi.domain_username, username,
+-		    sizeof (jdi.domain_username));
+-	}
++	/*
++	 * Note: username is null for "unsecure join"
++	 * (join using a pre-created computer account)
++	 * No password either.
++	 */
++	if (username != NULL) {
++		if ((p = strchr(username, '+')) != NULL) {
++			++p;
+ 
+-	if (smb_name_validate_account(jdi.domain_username) != ERROR_SUCCESS) {
+-		(void) fprintf(stderr,
+-		    gettext("username contains invalid characters\n"));
+-		smbadm_usage(B_FALSE);
+-	}
++			len = (int)(p - username);
++			if (len > sizeof (jdi.domain_name))
++				len = sizeof (jdi.domain_name);
+ 
+-	if (*jdi.domain_passwd == '\0') {
+-		prompt = gettext("Enter domain password: ");
++			(void) strlcpy(jdi.domain_username, username, len);
++			(void) strlcpy(jdi.domain_passwd, p,
++			    sizeof (jdi.domain_passwd));
++		} else {
++			(void) strlcpy(jdi.domain_username, username,
++			    sizeof (jdi.domain_username));
++		}
+ 
+-		if ((p = getpassphrase(prompt)) == NULL) {
+-			(void) fprintf(stderr, gettext("missing password\n"));
++		if (smb_name_validate_account(jdi.domain_username)
++		    != ERROR_SUCCESS) {
++			(void) fprintf(stderr,
++			    gettext("username contains invalid characters\n"));
+ 			smbadm_usage(B_FALSE);
+ 		}
+ 
+-		(void) strlcpy(jdi.domain_passwd, p,
+-		    sizeof (jdi.domain_passwd));
++		if (*jdi.domain_passwd == '\0') {
++			prompt = gettext("Enter domain password: ");
++
++			if ((p = getpassphrase(prompt)) == NULL) {
++				(void) fprintf(stderr, gettext(
++				    "missing password\n"));
++				smbadm_usage(B_FALSE);
++			}
++
++			(void) strlcpy(jdi.domain_passwd, p,
++			    sizeof (jdi.domain_passwd));
++		}
+ 	}
+ 
+ 	(void) printf(gettext("Joining %s ... this may take a minute ...\n"),
+@@ -635,6 +642,19 @@ smbadm_join_domain(const char *domain, const char *username)
+ 		bzero(&jdi, sizeof (jdi));
+ 		return (1);
+ 
++	case NT_STATUS_BAD_NETWORK_PATH:
++		(void) fprintf(stderr,
++		    gettext("failed to resolve domain controller name\n"));
++		bzero(&jdi, sizeof (jdi));
++		return (1);
++
++	case NT_STATUS_NETWORK_ACCESS_DENIED:
++	case NT_STATUS_BAD_NETWORK_NAME:
++		(void) fprintf(stderr,
++		    gettext("failed connecting to domain controller\n"));
++		bzero(&jdi, sizeof (jdi));
++		return (1);
++
+ 	default:
+ 		(void) fprintf(stderr, gettext("failed to join %s: %s\n"),
+ 		    jdi.domain_name, xlate_nt_status(status));
+diff --git a/cmd/smbsrv/smbd/smbd_join.c b/cmd/smbsrv/smbd/smbd_join.c
+index 54fcacc..74d5fac 100644
+--- a/cmd/smbsrv/smbd/smbd_join.c
++++ b/cmd/smbsrv/smbd/smbd_join.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #include <syslog.h>
+@@ -48,8 +49,7 @@ static cond_t smbd_dc_cv;
+ 
+ static void *smbd_dc_monitor(void *);
+ static void smbd_dc_update(void);
+-static boolean_t smbd_set_netlogon_cred(void);
+-static int smbd_get_kpasswd_srv(char *, size_t);
++/* Todo: static boolean_t smbd_set_netlogon_cred(void); */
+ static uint32_t smbd_join_workgroup(smb_joininfo_t *);
+ static uint32_t smbd_join_domain(smb_joininfo_t *);
+ 
+@@ -164,8 +164,8 @@ smbd_dc_update(void)
+ {
+ 	char		domain[MAXHOSTNAMELEN];
+ 	smb_domainex_t	info;
+-	smb_domain_t	*primary;
+-
++	smb_domain_t	*di;
++	DWORD		status;
+ 
+ 	if (smb_getfqdomainname(domain, MAXHOSTNAMELEN) != 0) {
+ 		(void) smb_getdomainname(domain, MAXHOSTNAMELEN);
+@@ -175,26 +175,24 @@ smbd_dc_update(void)
+ 	if (!smb_locate_dc(domain, "", &info)) {
+ 		smb_log(smbd.s_loghd, LOG_NOTICE,
+ 		    "smbd_dc_update: %s: locate failed", domain);
+-	} else {
+-		primary = &info.d_primary;
++		return;
++	}
+ 
+-		smb_config_setdomaininfo(primary->di_nbname,
+-		    primary->di_fqname,
+-		    primary->di_sid,
+-		    primary->di_u.di_dns.ddi_forest,
+-		    primary->di_u.di_dns.ddi_guid);
++	di = &info.d_primary;
++	smb_log(smbd.s_loghd, LOG_NOTICE,
++	    "smbd_dc_update: %s: located %s", domain, info.d_dc);
+ 
+-		smb_log(smbd.s_loghd, LOG_NOTICE,
+-		    "smbd_dc_update: %s: located %s", domain, info.d_dc);
+-	}
++	status = mlsvc_netlogon(info.d_dc, di->di_nbname);
++	if (status != NT_STATUS_SUCCESS) {
++		syslog(LOG_NOTICE,
++		    "failed to establish NETLOGON credential chain");
+ 
+-	if (smbd_set_netlogon_cred()) {
+ 		/*
+ 		 * Restart required because the domain changed
+ 		 * or the credential chain setup failed.
+ 		 */
+ 		smb_log(smbd.s_loghd, LOG_NOTICE,
+-		    "smbd_dc_update: %s: smb/server restart required");
++		    "smbd_dc_update: smb/server restart required");
+ 
+ 		if (smb_smf_restart_service() != 0)
+ 			smb_log(smbd.s_loghd, LOG_ERR,
+@@ -225,148 +223,6 @@ smbd_join(smb_joininfo_t *info)
+ 	return (status);
+ }
+ 
+-/*
+- * smbd_set_netlogon_cred
+- *
+- * If the system is joined to an AD domain via kclient, SMB daemon will need
+- * to establish the NETLOGON credential chain.
+- *
+- * Since the kclient has updated the machine password stored in SMF
+- * repository, the cached ipc_info must be updated accordingly by calling
+- * smb_ipc_commit.
+- *
+- * Due to potential replication delays in a multiple DC environment, the
+- * NETLOGON rpc request must be sent to the DC, to which the KPASSWD request
+- * is sent. If the DC discovered by the SMB daemon is different than the
+- * kpasswd server, the current connection with the DC will be torn down
+- * and a DC discovery process will be triggered to locate the kpasswd
+- * server.
+- *
+- * If joining a new domain, the domain_name property must be set after a
+- * successful credential chain setup.
+- */
+-static boolean_t
+-smbd_set_netlogon_cred(void)
+-{
+-	char kpasswd_srv[MAXHOSTNAMELEN];
+-	char kpasswd_domain[MAXHOSTNAMELEN];
+-	char sam_acct[SMB_SAMACCT_MAXLEN];
+-	char ipc_usr[SMB_USERNAME_MAXLEN];
+-	char *dom;
+-	boolean_t new_domain = B_FALSE;
+-	smb_domainex_t dxi;
+-	smb_domain_t *di;
+-
+-	if (smb_match_netlogon_seqnum())
+-		return (B_FALSE);
+-
+-	(void) smb_config_getstr(SMB_CI_KPASSWD_SRV, kpasswd_srv,
+-	    sizeof (kpasswd_srv));
+-
+-	if (*kpasswd_srv == '\0')
+-		return (B_FALSE);
+-
+-	/*
+-	 * If the domain join initiated by smbadm join CLI is in
+-	 * progress, don't do anything.
+-	 */
+-	(void) smb_getsamaccount(sam_acct, sizeof (sam_acct));
+-	smb_ipc_get_user(ipc_usr, SMB_USERNAME_MAXLEN);
+-	if (smb_strcasecmp(ipc_usr, sam_acct, 0))
+-		return (B_FALSE);
+-
+-	di = &dxi.d_primary;
+-	if (!smb_domain_getinfo(&dxi))
+-		(void) smb_getfqdomainname(di->di_fqname, MAXHOSTNAMELEN);
+-
+-	(void) smb_config_getstr(SMB_CI_KPASSWD_DOMAIN, kpasswd_domain,
+-	    sizeof (kpasswd_domain));
+-
+-	if (*kpasswd_domain != '\0' &&
+-	    smb_strcasecmp(kpasswd_domain, di->di_fqname, 0)) {
+-		dom = kpasswd_domain;
+-		new_domain = B_TRUE;
+-	} else {
+-		dom = di->di_fqname;
+-	}
+-
+-	/*
+-	 * DC discovery will be triggered if the domain info is not
+-	 * currently cached or the SMB daemon has previously discovered a DC
+-	 * that is different than the kpasswd server.
+-	 */
+-	if (new_domain || smb_strcasecmp(dxi.d_dc, kpasswd_srv, 0) != 0) {
+-		if (*dxi.d_dc != '\0')
+-			mlsvc_disconnect(dxi.d_dc);
+-
+-		if (!smb_locate_dc(dom, kpasswd_srv, &dxi)) {
+-			if (!smb_locate_dc(di->di_fqname, "", &dxi)) {
+-				smb_ipc_commit();
+-				return (B_FALSE);
+-			}
+-		}
+-	}
+-
+-	smb_ipc_commit();
+-	if (mlsvc_netlogon(dxi.d_dc, di->di_nbname)) {
+-		syslog(LOG_NOTICE,
+-		    "failed to establish NETLOGON credential chain");
+-		return (B_TRUE);
+-	} else {
+-		if (new_domain) {
+-			smb_config_setdomaininfo(di->di_nbname, di->di_fqname,
+-			    di->di_sid,
+-			    di->di_u.di_dns.ddi_forest,
+-			    di->di_u.di_dns.ddi_guid);
+-			(void) smb_config_setstr(SMB_CI_KPASSWD_DOMAIN, "");
+-		}
+-	}
+-
+-	return (new_domain);
+-}
+-
+-/*
+- * Retrieve the kpasswd server from krb5.conf.
+- *
+- * Initialization of the locate dc thread.
+- * Returns 0 on success, an error number if thread creation fails.
+- */
+-static int
+-smbd_get_kpasswd_srv(char *srv, size_t len)
+-{
+-	FILE *fp;
+-	static char buf[512];
+-	char *p;
+-
+-	*srv = '\0';
+-	p = getenv("KRB5_CONFIG");
+-	if (p == NULL || *p == '\0')
+-		p = "/etc/krb5/krb5.conf";
+-
+-	if ((fp = fopen(p, "r")) == NULL)
+-		return (-1);
+-
+-	while (fgets(buf, sizeof (buf), fp)) {
+-
+-		/* Weed out any comment text */
+-		(void) trim_whitespace(buf);
+-		if (*buf == '#')
+-			continue;
+-
+-		if ((p = strstr(buf, "kpasswd_server")) != NULL) {
+-			if ((p = strchr(p, '=')) != NULL) {
+-				(void) trim_whitespace(++p);
+-				(void) strlcpy(srv, p, len);
+-			}
+-			break;
+-		}
+-	}
+-
+-
+-	(void) fclose(fp);
+-	return ((*srv == '\0') ? -1 : 0);
+-}
+-
+ static uint32_t
+ smbd_join_workgroup(smb_joininfo_t *info)
+ {
+@@ -387,11 +243,10 @@ smbd_join_workgroup(smb_joininfo_t *info)
+ static uint32_t
+ smbd_join_domain(smb_joininfo_t *info)
+ {
+-	uint32_t status;
+-	unsigned char passwd_hash[SMBAUTH_HASH_SZ];
+-	char dc[MAXHOSTNAMELEN];
++	static unsigned char zero_hash[SMBAUTH_HASH_SZ];
+ 	smb_domainex_t dxi;
+ 	smb_domain_t *di;
++	uint32_t status;
+ 
+ 	/*
+ 	 * Ensure that any previous membership of this domain has
+@@ -399,43 +254,50 @@ smbd_join_domain(smb_joininfo_t *info)
+ 	 * will ensure that we don't attempt a NETLOGON_SAMLOGON
+ 	 * when attempting to find the PDC.
+ 	 */
+-
+ 	(void) smb_config_setbool(SMB_CI_DOMAIN_MEMB, B_FALSE);
+ 
+-	if (smb_auth_ntlm_hash(info->domain_passwd, passwd_hash)
+-	    != SMBAUTH_SUCCESS) {
+-		syslog(LOG_ERR, "smbd: could not compute ntlm hash for '%s'",
+-		    info->domain_username);
+-		return (NT_STATUS_INTERNAL_ERROR);
+-	}
++	/* Clear DNS local (ADS) lookup cache too. */
++	smb_ads_refresh();
+ 
+-	smb_ipc_set(info->domain_username, passwd_hash);
++	/*
++	 * Use a NULL session while searching for a DC, and
++	 * while getting information about the domain.
++	 */
++	smb_ipc_set(MLSVC_ANON_USER, zero_hash);
++
++	if (!smb_locate_dc(info->domain_name, "", &dxi)) {
++		syslog(LOG_ERR, "smbd: failed locating "
++		    "domain controller for %s",
++		    info->domain_name);
++		status = NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND;
++		goto errout;
++	}
+ 
+-	(void) smbd_get_kpasswd_srv(dc, sizeof (dc));
+ 	/* info->domain_name could either be NetBIOS domain name or FQDN */
+-	if (smb_locate_dc(info->domain_name, dc, &dxi)) {
+-		status = mlsvc_join(&dxi, info->domain_username,
+-		    info->domain_passwd);
+-
+-		if (status == NT_STATUS_SUCCESS) {
+-			di = &dxi.d_primary;
+-			smbd_set_secmode(SMB_SECMODE_DOMAIN);
+-			smb_config_setdomaininfo(di->di_nbname, di->di_fqname,
+-			    di->di_sid,
+-			    di->di_u.di_dns.ddi_forest,
+-			    di->di_u.di_dns.ddi_guid);
+-			smb_ipc_commit();
+-			return (status);
+-		}
+-
+-		smb_ipc_rollback();
++	status = mlsvc_join(&dxi, info->domain_username, info->domain_passwd);
++	if (status != NT_STATUS_SUCCESS) {
+ 		syslog(LOG_ERR, "smbd: failed joining %s (%s)",
+ 		    info->domain_name, xlate_nt_status(status));
+-		return (status);
++		goto errout;
+ 	}
+ 
++	/*
++	 * Success!
++	 *
++	 * Strange, mlsvc_join does some of the work to
++	 * save the config, then the rest happens here.
++	 * Todo: Do the config update all in one place.
++	 */
++	di = &dxi.d_primary;
++	smbd_set_secmode(SMB_SECMODE_DOMAIN);
++	smb_config_setdomaininfo(di->di_nbname, di->di_fqname,
++	    di->di_sid,
++	    di->di_u.di_dns.ddi_forest,
++	    di->di_u.di_dns.ddi_guid);
++	smb_ipc_commit();
++	return (status);
++
++errout:
+ 	smb_ipc_rollback();
+-	syslog(LOG_ERR, "smbd: failed locating domain controller for %s",
+-	    info->domain_name);
+-	return (NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND);
++	return (status);
+ }
+diff --git a/cmd/zfs/zfs_main.c b/cmd/zfs/zfs_main.c
+index 34ddad2..109a2cf 100644
+--- a/cmd/zfs/zfs_main.c
++++ b/cmd/zfs/zfs_main.c
+@@ -63,6 +63,7 @@
+ #include <libuutil.h>
+ #include <aclutils.h>
+ #include <directory.h>
++#include <idmap.h>
+ 
+ #include "zfs_iter.h"
+ #include "zfs_util.h"
+@@ -2372,9 +2373,8 @@ userspace_cb(void *arg, const char *domain, uid_t rid, uint64_t space)
+ 		/* SMB */
+ 		char sid[ZFS_MAXNAMELEN + 32];
+ 		uid_t id;
+-		uint64_t classes;
+ 		int err;
+-		directory_error_t e;
++		int flag = IDMAP_REQ_FLG_USE_CACHE;
+ 
+ 		smbentity = B_TRUE;
+ 
+@@ -2391,10 +2391,13 @@ userspace_cb(void *arg, const char *domain, uid_t rid, uint64_t space)
+ 		if (err == 0) {
+ 			rid = id;
+ 			if (!cb->cb_sid2posix) {
+-				e = directory_name_from_sid(NULL, sid, &name,
+-				    &classes);
+-				if (e != NULL)
+-					directory_error_free(e);
++				if (type == USTYPE_SMB_USR) {
++					(void) idmap_getwinnamebyuid(rid, flag,
++					    &name, NULL);
++				} else {
++					(void) idmap_getwinnamebygid(rid, flag,
++					    &name, NULL);
++				}
+ 				if (name == NULL)
+ 					name = sid;
+ 			}
+diff --git a/usr/src/lib/libidmap/common/idmap.h b/usr/src/lib/libidmap/common/idmap.h
+index 3a3af0d..01dce38 100644
+--- a/usr/src/lib/libidmap/common/idmap.h
++++ b/usr/src/lib/libidmap/common/idmap.h
+@@ -113,6 +113,9 @@ extern idmap_stat idmap_getwinnamebyuid(uid_t, int, char **, char **);
+ /* Given GID, get Windows name */
+ extern idmap_stat idmap_getwinnamebygid(gid_t, int, char **, char **);
+ 
++/* Given PID, get Windows name */
++extern idmap_stat idmap_getwinnamebypid(uid_t, int, int, char **, char **);
++
+ /* Given Windows name, get UID */
+ extern idmap_stat idmap_getuidbywinname(const char *, const char *,
+ 	int, uid_t *);
+diff --git a/usr/src/lib/libidmap/common/idmap_api.c b/usr/src/lib/libidmap/common/idmap_api.c
+index 36aba7b..315c01a 100644
+--- a/usr/src/lib/libidmap/common/idmap_api.c
++++ b/usr/src/lib/libidmap/common/idmap_api.c
+@@ -2173,7 +2173,7 @@ idmap_getgidbywinname(const char *name, const char *domain, int flag,
+ /*
+  * Get winname given pid
+  */
+-static idmap_retcode
++idmap_stat
+ idmap_getwinnamebypid(uid_t pid, int is_user, int flag, char **name,
+ 	char **domain)
+ {
+diff --git a/usr/src/lib/libidmap/common/mapfile-vers b/usr/src/lib/libidmap/common/mapfile-vers
+index fba4b64..4a6968c 100644
+--- a/usr/src/lib/libidmap/common/mapfile-vers
++++ b/usr/src/lib/libidmap/common/mapfile-vers
+@@ -83,6 +83,7 @@ SYMBOL_VERSION SUNWprivate {
+ 	idmap_getgidbywinname;
+ 	idmap_getuidbywinname;
+ 	idmap_getwinnamebygid;
++	idmap_getwinnamebypid;
+ 	idmap_getwinnamebyuid;
+ 	idmap_how_clear;
+ 	idmap_info_free;
+diff --git a/lib/libzfs/libzfs_dataset.c b/lib/libzfs/libzfs_dataset.c
+index 27c3cca..05a2fdc 100644
+--- a/lib/libzfs/libzfs_dataset.c
++++ b/lib/libzfs/libzfs_dataset.c
+@@ -2557,7 +2557,7 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
+ 	boolean_t isuser;
+ 
+ 	domain[0] = '\0';
+-
++	*ridp = 0;
+ 	/* Figure out the property type ({user|group}{quota|space}) */
+ 	for (type = 0; type < ZFS_NUM_USERQUOTA_PROPS; type++) {
+ 		if (strncmp(propname, zfs_userquota_prop_prefixes[type],
+@@ -2578,35 +2578,61 @@ userquota_propname_decode(const char *propname, boolean_t zoned,
+ 		 * It's a SID name (eg "user@domain") that needs to be
+ 		 * turned into S-1-domainID-RID.
+ 		 */
+-		directory_error_t e;
++		int flag = 0;
++		idmap_stat stat, map_stat;
++		uid_t pid;
++		idmap_rid_t rid;
++		idmap_get_handle_t *gh = NULL;
++
++		stat = idmap_get_create(&gh);
++		if (stat != IDMAP_SUCCESS) {
++			idmap_get_destroy(gh);
++			return (ENOMEM);
++		}
+ 		if (zoned && getzoneid() == GLOBAL_ZONEID)
+ 			return (ENOENT);
+ 		if (isuser) {
+-			e = directory_sid_from_user_name(NULL,
+-			    cp, &numericsid);
++			stat = idmap_getuidbywinname(cp, NULL, flag, &pid);
++			if (stat < 0)
++				return (ENOENT);
++			stat = idmap_get_sidbyuid(gh, pid, flag, &numericsid,
++			    &rid, &map_stat);
+ 		} else {
+-			e = directory_sid_from_group_name(NULL,
+-			    cp, &numericsid);
++			stat = idmap_getgidbywinname(cp, NULL, flag, &pid);
++			if (stat < 0)
++				return (ENOENT);
++			stat = idmap_get_sidbygid(gh, pid, flag, &numericsid,
++			    &rid, &map_stat);
++		}
++		if (stat < 0) {
++			idmap_get_destroy(gh);
++			return (ENOENT);
+ 		}
+-		if (e != NULL) {
+-			directory_error_free(e);
++		stat = idmap_get_mappings(gh);
++		idmap_get_destroy(gh);
++
++		if (stat < 0) {
+ 			return (ENOENT);
+ 		}
+ 		if (numericsid == NULL)
+ 			return (ENOENT);
+ 		cp = numericsid;
++		*ridp = rid;
+ 		/* will be further decoded below */
+ 	}
+ 
+ 	if (strncmp(cp, "S-1-", 4) == 0) {
+ 		/* It's a numeric SID (eg "S-1-234-567-89") */
+ 		(void) strlcpy(domain, cp, domainlen);
+-		cp = strrchr(domain, '-');
+-		*cp = '\0';
+-		cp++;
+-
+ 		errno = 0;
+-		*ridp = strtoull(cp, &end, 10);
++		if (*ridp == 0) {
++			cp = strrchr(domain, '-');
++			*cp = '\0';
++			cp++;
++			*ridp = strtoull(cp, &end, 10);
++		} else {
++			end = "";
++		}
+ 		if (numericsid) {
+ 			free(numericsid);
+ 			numericsid = NULL;
+diff --git a/usr/src/lib/pysolaris/common/misc.c b/usr/src/lib/pysolaris/common/misc.c
+index 923cab4..da7bb00 100644
+--- a/usr/src/lib/pysolaris/common/misc.c
++++ b/usr/src/lib/pysolaris/common/misc.c
+@@ -26,6 +26,7 @@
+ #include <Python.h>
+ #include <zone.h>
+ #include <libintl.h>
++#include <idmap.h>
+ #include <directory.h>
+ 
+ #ifdef __lint
+@@ -62,36 +63,32 @@ py_sid_to_id(PyObject *self, PyObject *args)
+ static PyObject *
+ py_sid_to_name(PyObject *self, PyObject *args)
+ {
+-	int isuser;
++	int isuser, err, flag = IDMAP_REQ_FLG_USE_CACHE;
+ 	char *name, *sid;
+-	directory_error_t e;
+-	uint64_t classes;
++	idmap_stat stat;
++	uid_t pid;
+ 	PyObject *ret;
+ 
+ 	if (!PyArg_ParseTuple(args, "si", &sid, &isuser))
+ 		return (NULL);
+-	e = directory_name_from_sid(NULL, sid, &name, &classes);
+-	if (e != NULL) {
+-		directory_error_free(e);
++
++	err = sid_to_id(sid, isuser, &pid);
++	if (err) {
+ 		PyErr_SetString(PyExc_KeyError, sid);
+ 		return (NULL);
+ 	}
+-	if (name == NULL) {
++	if (isuser)
++		stat = idmap_getwinnamebyuid(pid, flag, &name, NULL);
++	else
++		stat = idmap_getwinnamebygid(pid, flag, &name, NULL);
++	if (stat < 0) {
+ 		PyErr_SetString(PyExc_KeyError, sid);
+ 		return (NULL);
+ 	}
+-	if (isuser) {
+-		if (!(classes & DIRECTORY_CLASS_USER)) {
+-			free(name);
+-			PyErr_SetString(PyExc_KeyError, sid);
+-			return (NULL);
+-		}
+-	} else {
+-		if (!(classes & DIRECTORY_CLASS_GROUP)) {
+-			free(name);
+-			PyErr_SetString(PyExc_KeyError, sid);
+-			return (NULL);
+-		}
++
++	if (name == NULL) {
++		PyErr_SetString(PyExc_KeyError, sid);
++		return (NULL);
+ 	}
+ 
+ 	ret = PyString_FromString(name);
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/lsar_clnt.c b/usr/src/lib/smbsrv/libmlsvc/common/lsar_clnt.c
+index df29495..043ee29 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/lsar_clnt.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/lsar_clnt.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -88,7 +89,8 @@ static void lsar_set_trusted_domains(struct mslsa_EnumTrustedDomainBuf *,
+  *
+  * On success 0 is returned. Otherwise a -ve error code.
+  */
+-int lsar_open(char *server, char *domain, char *username,
++int
++lsar_open(char *server, char *domain, char *username,
+     mlsvc_handle_t *domain_handle)
+ {
+ 	if (server == NULL || domain == NULL)
+@@ -109,11 +111,6 @@ int lsar_open(char *server, char *domain, char *username,
+  * function via lsar_open to ensure that the appropriate connection is
+  * in place.
+  *
+- * I'm not sure if it makes a difference whether we use GENERIC_EXECUTE
+- * or STANDARD_RIGHTS_EXECUTE. For a long time I used the standard bit
+- * and then I added the generic bit while working on privileges because
+- * NT sets that bit. I don't think it matters.
+- *
+  * Returns 0 on success. Otherwise non-zero to indicate a failure.
+  */
+ int
+@@ -141,15 +138,7 @@ lsar_open_policy2(char *server, char *domain, char *username,
+ 
+ 	(void) snprintf((char *)arg.servername, len, "\\\\%s", server);
+ 	arg.attributes.length = sizeof (struct mslsa_object_attributes);
+-
+-	if (ndr_rpc_server_os(lsa_handle) == NATIVE_OS_WIN2000) {
+-		arg.desiredAccess = MAXIMUM_ALLOWED;
+-	} else {
+-		arg.desiredAccess = GENERIC_EXECUTE
+-		    | STANDARD_RIGHTS_EXECUTE
+-		    | POLICY_VIEW_LOCAL_INFORMATION
+-		    | POLICY_LOOKUP_NAMES;
+-	}
++	arg.desiredAccess = MAXIMUM_ALLOWED;
+ 
+ 	if ((rc = ndr_rpc_call(lsa_handle, opnum, &arg)) != 0) {
+ 		ndr_rpc_unbind(lsa_handle);
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc.h b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc.h
+index 8a5d557..d693d88 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc.h
++++ b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc.h
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef _SMBSRV_MLSVC_H
+@@ -33,6 +34,7 @@ extern "C" {
+ #endif
+ 
+ int smb_dclocator_init(void);
++void smbrdr_initialize(void);
+ void dssetup_initialize(void);
+ void srvsvc_initialize(void);
+ void wkssvc_initialize(void);
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_client.c b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_client.c
+index bbeb996..0a52a43 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_client.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_client.c
+@@ -20,8 +20,8 @@
+  */
+ 
+ /*
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -49,27 +49,6 @@
+ #include <libsmbrdr.h>
+ #include <mlsvc.h>
+ 
+-/*
+- * Server info cache entry expiration in seconds.
+- */
+-#define	NDR_SVINFO_TIMEOUT	1800
+-
+-typedef struct ndr_svinfo {
+-	list_node_t		svi_lnd;
+-	time_t			svi_tcached;
+-	char			svi_server[MAXNAMELEN];
+-	char			svi_domain[MAXNAMELEN];
+-	srvsvc_server_info_t	svi_svinfo;
+-} ndr_svinfo_t;
+-
+-typedef struct ndr_svlist {
+-	list_t		svl_list;
+-	mutex_t		svl_mtx;
+-	boolean_t	svl_init;
+-} ndr_svlist_t;
+-
+-static ndr_svlist_t ndr_svlist;
+-
+ static int ndr_xa_init(ndr_client_t *, ndr_xa_t *);
+ static int ndr_xa_exchange(ndr_client_t *, ndr_xa_t *);
+ static int ndr_xa_read(ndr_client_t *, ndr_xa_t *);
+@@ -77,53 +56,6 @@ static void ndr_xa_preserve(ndr_client_t *, ndr_xa_t *);
+ static void ndr_xa_destruct(ndr_client_t *, ndr_xa_t *);
+ static void ndr_xa_release(ndr_client_t *);
+ 
+-static int ndr_svinfo_lookup(char *, char *, srvsvc_server_info_t *);
+-static boolean_t ndr_svinfo_match(const char *, const char *, const
+-    ndr_svinfo_t *);
+-static boolean_t ndr_svinfo_expired(ndr_svinfo_t *);
+-
+-/*
+- * Initialize the RPC client interface: create the server info cache.
+- */
+-void
+-ndr_rpc_init(void)
+-{
+-	(void) mutex_lock(&ndr_svlist.svl_mtx);
+-
+-	if (!ndr_svlist.svl_init) {
+-		list_create(&ndr_svlist.svl_list, sizeof (ndr_svinfo_t),
+-		    offsetof(ndr_svinfo_t, svi_lnd));
+-		ndr_svlist.svl_init = B_TRUE;
+-	}
+-
+-	(void) mutex_unlock(&ndr_svlist.svl_mtx);
+-}
+-
+-/*
+- * Terminate the RPC client interface: flush and destroy the server info
+- * cache.
+- */
+-void
+-ndr_rpc_fini(void)
+-{
+-	ndr_svinfo_t *svi;
+-
+-	(void) mutex_lock(&ndr_svlist.svl_mtx);
+-
+-	if (ndr_svlist.svl_init) {
+-		while ((svi = list_head(&ndr_svlist.svl_list)) != NULL) {
+-			list_remove(&ndr_svlist.svl_list, svi);
+-			free(svi->svi_svinfo.sv_name);
+-			free(svi->svi_svinfo.sv_comment);
+-			free(svi);
+-		}
+-
+-		list_destroy(&ndr_svlist.svl_list);
+-		ndr_svlist.svl_init = B_FALSE;
+-	}
+-
+-	(void) mutex_unlock(&ndr_svlist.svl_mtx);
+-}
+ 
+ /*
+  * This call must be made to initialize an RPC client structure and bind
+@@ -158,10 +90,9 @@ ndr_rpc_bind(mlsvc_handle_t *handle, char *server, char *domain,
+ 
+ 	/*
+ 	 * Set the default based on the assumption that most
+-	 * servers will be Windows 2000 or later.
+-	 * Don't lookup the svinfo if this is a SRVSVC request
+-	 * because the SRVSVC is used to get the server info.
+-	 * None of the SRVSVC calls depend on the server info.
++	 * servers will be Windows 2000 or later.  This used to
++	 * try to get the actual server version, but that RPC
++	 * is not necessarily allowed anymore, so don't bother.
+ 	 */
+ 	bzero(&svinfo, sizeof (srvsvc_server_info_t));
+ 	svinfo.sv_platform_id = SV_PLATFORM_ID_NT;
+@@ -170,8 +101,12 @@ ndr_rpc_bind(mlsvc_handle_t *handle, char *server, char *domain,
+ 	svinfo.sv_type = SV_TYPE_DEFAULT;
+ 	svinfo.sv_os = NATIVE_OS_WIN2000;
+ 
+-	if (strcasecmp(service, "SRVSVC") != 0)
+-		(void) ndr_svinfo_lookup(server, domain, &svinfo);
++	/*
++	 * Some callers pass this when they want a NULL session.
++	 * Todo: have callers pass an empty string for that.
++	 */
++	if (strcmp(username, MLSVC_ANON_USER) == 0)
++		username = "";
+ 
+ 	/*
+ 	 * Setup smbfs library handle, authenticate, connect to
+@@ -180,9 +115,10 @@ ndr_rpc_bind(mlsvc_handle_t *handle, char *server, char *domain,
+ 	 * server, user, domain.
+ 	 */
+ 	if ((rc = smbrdr_ctx_new(&ctx, server, domain, username)) != 0) {
+-		syslog(LOG_ERR, "ndr_rpc_bind: "
+-		    "smbrdr_ctx_new(S=%s, D=%s, U=%s), err=%d",
+-		    server, domain, username, rc);
++		syslog(LOG_ERR, "ndr_rpc_bind: smbrdr_ctx_new"
++		    "(Srv=%s Dom=%s User=%s), %s (0x%x)",
++		    server, domain, username,
++		    xlate_nt_status(rc), rc);
+ 		goto errout;
+ 	}
+ 
+@@ -200,7 +136,7 @@ ndr_rpc_bind(mlsvc_handle_t *handle, char *server, char *domain,
+ 	 * Setup the RPC client handle.
+ 	 */
+ 	if ((clnt = malloc(sizeof (ndr_client_t))) == NULL)
+-		return (-1);
++		goto errout;
+ 	bzero(clnt, sizeof (ndr_client_t));
+ 
+ 	clnt->handle = &handle->handle;
+@@ -623,107 +559,6 @@ ndr_xa_release(ndr_client_t *clnt)
+ 	}
+ }
+ 
+-/*
+- * Lookup platform, type and version information about a server.
+- * If the cache doesn't already contain the data, contact the server and
+- * cache the response before returning the server info to the caller.
+- *
+- * We don't provide the name or comment for now, which avoids the need
+- * to deal with unnecessary memory management.
+- */
+-static int
+-ndr_svinfo_lookup(char *server, char *domain, srvsvc_server_info_t *svinfo)
+-{
+-	static boolean_t	timechecked = B_FALSE;
+-	ndr_svinfo_t *svi;
+-
+-	(void) mutex_lock(&ndr_svlist.svl_mtx);
+-	if (!ndr_svlist.svl_init)
+-		return (-1);
+-
+-	svi = list_head(&ndr_svlist.svl_list);
+-	while (svi != NULL) {
+-		if (ndr_svinfo_expired(svi)) {
+-			svi = list_head(&ndr_svlist.svl_list);
+-			continue;
+-		}
+-
+-		if (ndr_svinfo_match(server, domain, svi)) {
+-			bcopy(&svi->svi_svinfo, svinfo,
+-			    sizeof (srvsvc_server_info_t));
+-			svinfo->sv_name = NULL;
+-			svinfo->sv_comment = NULL;
+-			(void) mutex_unlock(&ndr_svlist.svl_mtx);
+-			return (0);
+-		}
+-
+-		svi = list_next(&ndr_svlist.svl_list, svi);
+-	}
+-
+-	if ((svi = malloc(sizeof (ndr_svinfo_t))) == NULL) {
+-		(void) mutex_unlock(&ndr_svlist.svl_mtx);
+-		return (-1);
+-	}
+-
+-	if (srvsvc_net_server_getinfo(server, domain, &svi->svi_svinfo) < 0) {
+-		(void) mutex_unlock(&ndr_svlist.svl_mtx);
+-		free(svi);
+-		return (-1);
+-	}
+-
+-	(void) time(&svi->svi_tcached);
+-	(void) strlcpy(svi->svi_server, server, MAXNAMELEN);
+-	(void) strlcpy(svi->svi_domain, domain, MAXNAMELEN);
+-	list_insert_tail(&ndr_svlist.svl_list, svi);
+-	bcopy(&svi->svi_svinfo, svinfo, sizeof (srvsvc_server_info_t));
+-	svinfo->sv_name = NULL;
+-	svinfo->sv_comment = NULL;
+-
+-	if (!timechecked) {
+-		timechecked = B_TRUE;
+-		ndr_srvsvc_timecheck(server, domain);
+-	}
+-
+-	(void) mutex_unlock(&ndr_svlist.svl_mtx);
+-	return (0);
+-}
+-
+-static boolean_t
+-ndr_svinfo_match(const char *server, const char *domain,
+-    const ndr_svinfo_t *svi)
+-{
+-	if ((smb_strcasecmp(server, svi->svi_server, 0) == 0) &&
+-	    (smb_strcasecmp(domain, svi->svi_domain, 0) == 0)) {
+-		return (B_TRUE);
+-	}
+-
+-	return (B_FALSE);
+-}
+-
+-/*
+- * If the server info in the cache has expired, discard it and return true.
+- * Otherwise return false.
+- *
+- * This is a private function to support ndr_svinfo_lookup() that assumes
+- * the list mutex is held.
+- */
+-static boolean_t
+-ndr_svinfo_expired(ndr_svinfo_t *svi)
+-{
+-	time_t	tnow;
+-
+-	(void) time(&tnow);
+-
+-	if (difftime(tnow, svi->svi_tcached) > NDR_SVINFO_TIMEOUT) {
+-		list_remove(&ndr_svlist.svl_list, svi);
+-		free(svi->svi_svinfo.sv_name);
+-		free(svi->svi_svinfo.sv_comment);
+-		free(svi);
+-		return (B_TRUE);
+-	}
+-
+-	return (B_FALSE);
+-}
+ 
+ /*
+  * Compare the time here with the remote time on the server
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_domain.c b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_domain.c
+index 32f87fb..00040f5 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_domain.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_domain.c
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #include <syslog.h>
+@@ -65,7 +65,7 @@ static pthread_t smb_dclocator_thr;
+ 
+ static void *smb_ddiscover_service(void *);
+ static void smb_ddiscover_main(char *, char *);
+-static boolean_t smb_ddiscover_dns(char *, char *, smb_domainex_t *);
++static uint32_t smb_ddiscover_dns(char *, char *, smb_domainex_t *);
+ static boolean_t smb_ddiscover_nbt(char *, char *, smb_domainex_t *);
+ static boolean_t smb_ddiscover_domain_match(char *, char *, uint32_t);
+ static uint32_t smb_ddiscover_qinfo(char *, char *, smb_domainex_t *);
+@@ -235,26 +235,27 @@ static void
+ smb_ddiscover_main(char *domain, char *server)
+ {
+ 	smb_domainex_t dxi;
+-	boolean_t discovered;
++	uint32_t status;
+ 
+ 	bzero(&dxi, sizeof (smb_domainex_t));
+ 
+ 	if (smb_domain_start_update() != SMB_DOMAIN_SUCCESS)
+ 		return;
+ 
+-	if (SMB_IS_FQDN(domain))
+-		discovered = smb_ddiscover_dns(domain, server, &dxi);
+-	else
+-		discovered = smb_ddiscover_nbt(domain, server, &dxi);
++	status = smb_ddiscover_dns(domain, server, &dxi);
++	if (status != 0 && !SMB_IS_FQDN(domain)) {
++		if (smb_ddiscover_nbt(domain, server, &dxi))
++			status = 0;
++	}
+ 
+-	if (discovered)
++	if (status == 0)
+ 		smb_domain_update(&dxi);
+ 
+ 	smb_domain_end_update();
+ 
+ 	smb_domainex_free(&dxi);
+ 
+-	if (discovered)
++	if (status == 0)
+ 		smb_domain_save();
+ }
+ 
+@@ -262,16 +263,16 @@ smb_ddiscover_main(char *domain, char *server)
+  * Discovers a DC for the specified domain via DNS. If a DC is found
+  * primary and trusted domains information will be queried.
+  */
+-static boolean_t
++static uint32_t
+ smb_ddiscover_dns(char *domain, char *server, smb_domainex_t *dxi)
+ {
+ 	uint32_t status;
+ 
+ 	if (!smb_ads_lookup_msdcs(domain, server, dxi->d_dc, MAXHOSTNAMELEN))
+-		return (B_FALSE);
++		return (NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND);
+ 
+ 	status = smb_ddiscover_qinfo(domain, dxi->d_dc, dxi);
+-	return (status == NT_STATUS_SUCCESS);
++	return (status);
+ }
+ 
+ /*
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_init.c b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_init.c
+index f1d11a6..0fbe2a6 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_init.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_init.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #include <sys/errno.h>
+@@ -60,7 +60,7 @@ mlsvc_init(void)
+ 		return (rc);
+ 
+ 	smb_quota_init();
+-	ndr_rpc_init();
++	smbrdr_initialize();
+ 	srvsvc_initialize();
+ 	wkssvc_initialize();
+ 	lsarpc_initialize();
+@@ -89,7 +89,6 @@ mlsvc_fini(void)
+ 	svcctl_finalize();
+ 	logr_finalize();
+ 	netdfs_finalize();
+-	ndr_rpc_fini();
+ 	smb_quota_fini();
+ }
+ 
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_util.c b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_util.c
+index e9ff666..45973ab 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_util.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/mlsvc_util.c
+@@ -19,8 +19,8 @@
+  * CDDL HEADER END
+  */
+ /*
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -40,19 +40,26 @@
+ #include <smbsrv/libsmb.h>
+ #include <smbsrv/libsmbns.h>
+ #include <smbsrv/libmlsvc.h>
++#include <smbsrv/ntaccess.h>
+ #include <smbsrv/smbinfo.h>
+ #include <libsmbrdr.h>
+ #include <lsalib.h>
+ #include <samlib.h>
+ #include <smbsrv/netrauth.h>
+ 
+-/* Domain join support (using MS-RPC) */
+-static boolean_t mlsvc_ntjoin_support = B_FALSE;
+-
+ extern int netr_open(char *, char *, mlsvc_handle_t *);
+ extern int netr_close(mlsvc_handle_t *);
+ extern DWORD netlogon_auth(char *, mlsvc_handle_t *, DWORD);
+ 
++static DWORD
++mlsvc_join_rpc(smb_domainex_t *dxi,
++	char *admin_user, char *admin_pw,
++	char *machine_name, char *machine_pw);
++static DWORD
++mlsvc_join_noauth(smb_domainex_t *dxi,
++	char *machine_name, char *machine_pw);
++
++
+ DWORD
+ mlsvc_netlogon(char *server, char *domain)
+ {
+@@ -66,79 +73,268 @@ mlsvc_netlogon(char *server, char *domain)
+ 			    "credential chain");
+ 		(void) netr_close(&netr_handle);
+ 	} else {
+-		status = NT_STATUS_OPEN_FAILED;
++		syslog(LOG_NOTICE, "Failed to connect to %s "
++		    "for domain %s", server, domain);
++		status = NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
+ 	}
+ 
+ 	return (status);
+ }
+ 
+ /*
+- * Joins the specified domain by creating a machine account on
+- * the selected domain controller.
++ * Join the specified domain.  The method varies depending on whether
++ * we're using "secure join" (using an administrative account to join)
++ * or "unsecure join" (using a pre-created machine account).  In the
++ * latter case, the machine account is created "by hand" before this
++ * machine attempts to join, and we just change the password from the
++ * (weak) default password for a new machine account to a random one.
+  *
+- * Disconnect any existing connection with the domain controller.
+- * This will ensure that no stale connection will be used, it will
+- * also pickup any configuration changes in either side by trying
+- * to establish a new connection.
++ * Note that the caller has already done "DC discovery" and passes the
++ * domain info. in the first arg.
+  *
+  * Returns NT status codes.
+  */
+ DWORD
+-mlsvc_join(smb_domainex_t *dxi, char *user, char *plain_text)
++mlsvc_join(smb_domainex_t *dxi, char *admin_user, char *admin_pw)
+ {
+-	int erc;
++	char machine_name[SMB_SAMACCT_MAXLEN];
++	char machine_pw[NETR_MACHINE_ACCT_PASSWD_MAX];
++	unsigned char passwd_hash[SMBAUTH_HASH_SZ];
++	smb_domain_t *di = &dxi->d_primary;
+ 	DWORD status;
+-	char machine_passwd[NETR_MACHINE_ACCT_PASSWD_MAX];
+-	smb_adjoin_status_t err;
+-	smb_domain_t *domain;
+-
+-	machine_passwd[0] = '\0';
++	int rc;
+ 
+-	domain = &dxi->d_primary;
++	/*
++	 * Domain join support: AD (Kerberos+LDAP) or MS-RPC?
++	 * Leave the AD code path disabled until it can be
++	 * fixed up so that the SMB server is in complete
++	 * control of which AD server we talk to.  See:
++	 * NX 12427 (Re-enable Kerberos+LDAP with...)
++	 */
++	boolean_t ads_enabled = smb_config_get_ads_enable();
+ 
+-	mlsvc_disconnect(dxi->d_dc);
++	if (smb_getsamaccount(machine_name, sizeof (machine_name)) != 0)
++		return (NT_STATUS_INTERNAL_ERROR);
+ 
+-	erc = smbrdr_logon(dxi->d_dc, domain->di_nbname, user);
++	(void) smb_gen_random_passwd(machine_pw, sizeof (machine_pw));
+ 
+-	if (erc == AUTH_USER_GRANT) {
+-		if (mlsvc_ntjoin_support == B_FALSE) {
++	/*
++	 * A non-null user means we do "secure join".
++	 */
++	if (admin_user != NULL && admin_user[0] != '\0') {
++		/*
++		 * Doing "secure join", so authenticate as the
++		 * specified user (with admin. rights).
++		 */
++		(void) smb_auth_ntlm_hash(admin_pw, passwd_hash);
++		smb_ipc_set(admin_user, passwd_hash);
+ 
+-			if ((err = smb_ads_join(domain->di_fqname, user,
+-			    plain_text, machine_passwd,
+-			    sizeof (machine_passwd))) == SMB_ADJOIN_SUCCESS) {
+-				status = NT_STATUS_SUCCESS;
+-			} else {
++		/*
++		 * If enabled, try to join using AD Services.
++		 * The ADS code needs work.  Not enabled yet.
++		 */
++		status = NT_STATUS_UNSUCCESSFUL;
++		if (ads_enabled) {
++			smb_adjoin_status_t err;
++			err = smb_ads_join(di->di_fqname,
++			    admin_user, admin_pw, machine_pw);
++			if (err != SMB_ADJOIN_SUCCESS) {
+ 				smb_ads_join_errmsg(err);
+-				status = NT_STATUS_UNSUCCESSFUL;
+-			}
+-		} else {
+-
+-			status = sam_create_trust_account(dxi->d_dc,
+-			    domain->di_nbname);
+-			if (status == NT_STATUS_SUCCESS) {
+-				(void) smb_getnetbiosname(machine_passwd,
+-				    sizeof (machine_passwd));
+-				(void) smb_strlwr(machine_passwd);
++			} else {
++				status = NT_STATUS_SUCCESS;
+ 			}
+ 		}
+ 
+-		if (status == NT_STATUS_SUCCESS) {
+-			erc = smb_setdomainprops(NULL, dxi->d_dc,
+-			    machine_passwd);
+-			if (erc != 0) {
+-				syslog(LOG_NOTICE,
+-				    "Failed to update configuration");
+-				bzero(machine_passwd, sizeof (machine_passwd));
+-				return (NT_STATUS_UNSUCCESSFUL);
+-			}
+-
+-			status = mlsvc_netlogon(dxi->d_dc, domain->di_nbname);
++		/*
++		 * If ADS was disabled or gave an error,
++		 * fall-back and try to join using RPC.
++		 */
++		if (status != NT_STATUS_SUCCESS) {
++			status = mlsvc_join_rpc(dxi,
++			    admin_user, admin_pw,
++			    machine_name, machine_pw);
+ 		}
++
+ 	} else {
+-		status = NT_STATUS_LOGON_FAILURE;
++		/*
++		 * Doing "Unsecure join" (pre-created account)
++		 */
++		bzero(passwd_hash, sizeof (passwd_hash));
++		smb_ipc_set(MLSVC_ANON_USER, passwd_hash);
++
++		status = mlsvc_join_noauth(dxi, machine_name, machine_pw);
+ 	}
+ 
+-	bzero(machine_passwd, sizeof (machine_passwd));
++	if (status != NT_STATUS_SUCCESS)
++		goto out;
++
++	/*
++	 * Make sure we can authenticate using the
++	 * (new, or updated) machine account.
++	 */
++	(void) smb_auth_ntlm_hash(machine_pw, passwd_hash);
++	smb_ipc_set(machine_name, passwd_hash);
++	rc = smbrdr_logon(dxi->d_dc, di->di_nbname, machine_name);
++	if (rc != 0) {
++		syslog(LOG_NOTICE, "Authenticate with "
++		    "new/updated machine account: %s",
++		    strerror(rc));
++		status = NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
++		goto out;
++	}
++
++	/*
++	 * Store the new machine account password.
++	 */
++	rc = smb_setdomainprops(NULL, dxi->d_dc, machine_pw);
++	if (rc != 0) {
++		syslog(LOG_NOTICE,
++		    "Failed to save machine account password");
++		status = NT_STATUS_INTERNAL_DB_ERROR;
++		goto out;
++	}
++
++	/*
++	 * Update idmap config
++	 */
++	if (smb_config_set_idmap_domain(di->di_fqname) != 0)
++		syslog(LOG_NOTICE, "Failed to set idmap domain name");
++	if (smb_config_refresh_idmap() != 0)
++		syslog(LOG_NOTICE, "Failed to refresh idmap service");
++
++	/*
++	 * Note: The caller (smbd) saves the "secmode" and
++	 * domain info (via smb_config_setdomaininfo) and
++	 * and does smb_ipc_commit (or rollback).
++	 */
++	status = 0;
++
++out:
++	/* Avoid leaving cleartext passwords around. */
++	bzero(machine_pw, sizeof (machine_pw));
++	bzero(passwd_hash, sizeof (passwd_hash));
++
++	return (status);
++}
++
++static DWORD
++mlsvc_join_rpc(smb_domainex_t *dxi,
++	char *admin_user, char *admin_pw,
++	char *machine_name,  char *machine_pw)
++{
++	mlsvc_handle_t samr_handle;
++	mlsvc_handle_t domain_handle;
++	mlsvc_handle_t user_handle;
++	smb_account_t ainfo;
++	char *server = dxi->d_dc;
++	smb_domain_t *di = &dxi->d_primary;
++	DWORD account_flags;
++	DWORD rid;
++	DWORD status;
++	int rc;
++
++	/* Caller did smb_ipc_set() so we don't need the pw for now. */
++	_NOTE(ARGUNUSED(admin_pw));
++
++	rc = samr_open(server, di->di_nbname, admin_user,
++	    MAXIMUM_ALLOWED, &samr_handle);
++	if (rc != 0) {
++		syslog(LOG_NOTICE, "sam_connect to server %s failed", server);
++		return (RPC_NT_SERVER_UNAVAILABLE);
++	}
++	/* have samr_handle */
++
++	status = samr_open_domain(&samr_handle, MAXIMUM_ALLOWED,
++	    (struct samr_sid *)di->di_binsid, &domain_handle);
++	if (status != NT_STATUS_SUCCESS)
++		goto out_samr_handle;
++	/* have domain_handle */
++
++	account_flags = SAMR_AF_WORKSTATION_TRUST_ACCOUNT;
++	status = samr_create_user(&domain_handle, machine_name,
++	    account_flags, &rid, &user_handle);
++	if (status == NT_STATUS_USER_EXISTS) {
++		status = samr_lookup_domain_names(&domain_handle,
++		    machine_name, &ainfo);
++		if (status != NT_STATUS_SUCCESS)
++			goto out_domain_handle;
++		status = samr_open_user(&domain_handle, MAXIMUM_ALLOWED,
++		    ainfo.a_rid, &user_handle);
++	}
++	if (status != NT_STATUS_SUCCESS) {
++		syslog(LOG_NOTICE,
++		    "Create or open machine account: %s",
++		    xlate_nt_status(status));
++		goto out_domain_handle;
++	}
++
++	/*
++	 * The account exists, and we have user_handle open
++	 * on that account.  Set the password and flags.
++	 */
++
++	status = netr_set_user_password(&user_handle, machine_pw);
++	if (status != NT_STATUS_SUCCESS) {
++		syslog(LOG_NOTICE,
++		    "Set machine account password: %s",
++		    xlate_nt_status(status));
++		goto out_user_handle;
++	}
++
++	account_flags |= SAMR_AF_DONT_EXPIRE_PASSWD;
++	status = netr_set_user_control(&user_handle, account_flags);
++	if (status != NT_STATUS_SUCCESS) {
++		syslog(LOG_NOTICE,
++		    "Set machine account control flags: %s",
++		    xlate_nt_status(status));
++		goto out_user_handle;
++	}
++
++out_user_handle:
++	(void) samr_close_handle(&user_handle);
++out_domain_handle:
++	(void) samr_close_handle(&domain_handle);
++out_samr_handle:
++	(void) samr_close_handle(&samr_handle);
++
++	return (status);
++}
++
++/*
++ * Doing "Unsecure join" (using a pre-created machine account).
++ * All we need to do is change the password from the default
++ * to a random string.
++ *
++ * Note: this is a work in progres.  Nexenta issue 11960
++ * (allow joining an AD domain using a pre-created computer account)
++ * It turns out that to change the machine account password,
++ * we need to use a different RPC call, performed over the
++ * NetLogon secure channel.  (See netr_server_password_set2)
++ */
++static DWORD
++mlsvc_join_noauth(smb_domainex_t *dxi,
++	char *machine_name, char *machine_pw)
++{
++	char old_pw[SMB_SAMACCT_MAXLEN];
++	DWORD status;
++
++	/*
++	 * Compose the current (default) password for the
++	 * pre-created machine account, which is just the
++	 * account name in lower case, truncated to 14
++	 * characters.
++	 */
++	if (smb_gethostname(old_pw, sizeof (old_pw), SMB_CASE_LOWER) != 0)
++		return (NT_STATUS_INTERNAL_ERROR);
++	old_pw[14] = '\0';
++
++	status = netr_change_password(dxi->d_dc, machine_name,
++	    old_pw, machine_pw);
++	if (status != NT_STATUS_SUCCESS) {
++		syslog(LOG_NOTICE,
++		    "Change machine account password: %s",
++		    xlate_nt_status(status));
++	}
+ 	return (status);
+ }
+ 
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/netr_auth.c b/usr/src/lib/smbsrv/libmlsvc/common/netr_auth.c
+index 96fc566..4b02242 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/netr_auth.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/netr_auth.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -104,6 +105,12 @@ netlogon_auth(char *server, mlsvc_handle_t *netr_handle, DWORD flags)
+ 	if ((rc = netr_server_req_challenge(netr_handle, netr_info)) == 0) {
+ 		rc = netr_server_authenticate2(netr_handle, netr_info);
+ 		if (rc == 0) {
++			/*
++			 * TODO: (later)  When joining a domain using a
++			 * pre-created machine account, should do:
++			 * netr_server_password_set(&netr_handle, netr_info);
++			 * Nexenta issue 11960
++			 */
+ 			smb_update_netlogon_seqnum();
+ 			netr_info->flags |= NETR_FLG_VALID;
+ 
+@@ -490,7 +497,7 @@ netr_server_password_set(mlsvc_handle_t *netr_handle, netr_info_t *netr_info)
+ 
+ 	arg.servername = (unsigned char *)netr_info->server;
+ 	arg.account_name = (unsigned char *)account_name;
+-	arg.account_type = NETR_WKSTA_TRUST_ACCOUNT_TYPE;
++	arg.sec_chan_type = NETR_WKSTA_TRUST_ACCOUNT_TYPE;
+ 	arg.hostname = (unsigned char *)netr_info->hostname;
+ 
+ 	/*
+@@ -509,7 +516,7 @@ netr_server_password_set(mlsvc_handle_t *netr_handle, netr_info_t *netr_info)
+ 		return (-1);
+ 	}
+ 
+-	(void) memcpy(&arg.uas_new_password, &new_password,
++	(void) memcpy(&arg.owf_password, &new_password,
+ 	    NETR_OWF_PASSWORD_SZ);
+ 
+ 	if (ndr_rpc_call(netr_handle, opnum, &arg) != 0)
+@@ -569,3 +576,8 @@ netr_gen_password(BYTE *session_key, BYTE *old_password, BYTE *new_password)
+ 	    NETR_DESKEY_LEN, &old_password[8], 8);
+ 	return (rv);
+ }
++
++/*
++ * Todo: need netr_server_password_set2()
++ * used by "unsecure join". (NX 11960)
++ */
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/samlib.c b/usr/src/lib/smbsrv/libmlsvc/common/samlib.c
+index 601283f..1a2233c 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/samlib.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/samlib.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -28,6 +29,10 @@
+  * functions.
+  */
+ 
++#include <sys/types.h>
++#include <sys/isa_defs.h>
++#include <sys/byteorder.h>
++
+ #include <alloca.h>
+ 
+ #include <smbsrv/libsmb.h>
+@@ -36,128 +41,32 @@
+ #include <lsalib.h>
+ #include <samlib.h>
+ 
++#ifdef _LITTLE_ENDIAN
++/* little-endian values on little-endian */
++#define	htolel(x)	((uint32_t)(x))
++#define	letohl(x)	((uint32_t)(x))
++#else	/* (BYTE_ORDER == LITTLE_ENDIAN) */
++/* little-endian values on big-endian (swap) */
++#define	letohl(x) 	BSWAP_32(x)
++#define	htolel(x) 	BSWAP_32(x)
++#endif	/* (BYTE_ORDER == LITTLE_ENDIAN) */
++
+ /*
+  * Valid values for the OEM OWF password encryption.
+  */
+-#define	SAM_PASSWORD_516	516
+ #define	SAM_KEYLEN		16
+ 
+-extern DWORD samr_set_user_info(mlsvc_handle_t *);
+-static struct samr_sid *sam_get_domain_sid(mlsvc_handle_t *, char *, char *);
+-
+-/*
+- * sam_create_trust_account
+- *
+- * Create a trust account for this system.
+- *
+- *	SAMR_AF_WORKSTATION_TRUST_ACCOUNT: servers and workstations.
+- *	SAMR_AF_SERVER_TRUST_ACCOUNT: domain controllers.
+- *
+- * Returns NT status codes.
+- */
+-DWORD
+-sam_create_trust_account(char *server, char *domain)
+-{
+-	char account_name[SMB_SAMACCT_MAXLEN];
+-	DWORD status;
+-
+-	if (smb_getsamaccount(account_name, SMB_SAMACCT_MAXLEN) != 0)
+-		return (NT_STATUS_INTERNAL_ERROR);
+-
+-	/*
+-	 * The trust account value here should match
+-	 * the value that will be used when the user
+-	 * information is set on this account.
+-	 */
+-	status = sam_create_account(server, domain, account_name,
+-	    SAMR_AF_WORKSTATION_TRUST_ACCOUNT);
+-
+-	/*
+-	 * Based on network traces, a Windows 2000 client will
+-	 * always try to create the computer account first.
+-	 * If it existed, then check the user permission to join
+-	 * the domain.
+-	 */
+-
+-	if (status == NT_STATUS_USER_EXISTS)
+-		status = sam_check_user(server, domain, account_name);
+-
+-	return (status);
+-}
++static void samr_fill_userpw(struct samr_user_password *, const char *);
++static void samr_make_encrypted_password(
++	struct samr_encr_passwd *epw,
++	char *new_pw_clear,
++	uint8_t *crypt_key);
+ 
+ 
+ /*
+- * sam_create_account
+- *
+- * Create the specified domain account in the SAM database on the
+- * domain controller.
+- *
+- * Account flags:
+- *		SAMR_AF_NORMAL_ACCOUNT
+- *		SAMR_AF_WORKSTATION_TRUST_ACCOUNT
+- *		SAMR_AF_SERVER_TRUST_ACCOUNT
+- *
+- * Returns NT status codes.
++ * Todo: Implement "unjoin" domain, which would use the
++ * sam_remove_trust_account code below.
+  */
+-DWORD
+-sam_create_account(char *server, char *domain_name, char *account_name,
+-    DWORD account_flags)
+-{
+-	mlsvc_handle_t samr_handle;
+-	mlsvc_handle_t domain_handle;
+-	mlsvc_handle_t user_handle;
+-	union samr_user_info sui;
+-	struct samr_sid *sid;
+-	DWORD rid;
+-	DWORD status;
+-	int rc;
+-	char user[SMB_USERNAME_MAXLEN];
+-
+-	smb_ipc_get_user(user, SMB_USERNAME_MAXLEN);
+-
+-	rc = samr_open(server, domain_name, user, SAM_CONNECT_CREATE_ACCOUNT,
+-	    &samr_handle);
+-
+-	if (rc != 0) {
+-		status = NT_STATUS_OPEN_FAILED;
+-		smb_tracef("SamCreateAccount[%s\\%s]: %s",
+-		    domain_name, account_name, xlate_nt_status(status));
+-		return (status);
+-	}
+-
+-	sid = sam_get_domain_sid(&samr_handle, server, domain_name);
+-
+-	status = samr_open_domain(&samr_handle,
+-	    SAM_DOMAIN_CREATE_ACCOUNT, sid, &domain_handle);
+-
+-	if (status == NT_STATUS_SUCCESS) {
+-		status = samr_create_user(&domain_handle, account_name,
+-		    account_flags, &rid, &user_handle);
+-
+-		if (status == NT_STATUS_SUCCESS) {
+-			(void) samr_query_user_info(&user_handle,
+-			    SAMR_QUERY_USER_CONTROL_INFO, &sui);
+-
+-			(void) samr_get_user_pwinfo(&user_handle);
+-			(void) samr_set_user_info(&user_handle);
+-			(void) samr_close_handle(&user_handle);
+-		} else if (status != NT_STATUS_USER_EXISTS) {
+-			smb_tracef("SamCreateAccount[%s]: %s",
+-			    account_name, xlate_nt_status(status));
+-		}
+-
+-		(void) samr_close_handle(&domain_handle);
+-	} else {
+-		smb_tracef("SamCreateAccount[%s]: open domain failed",
+-		    account_name);
+-		status = (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
+-	}
+-
+-	(void) samr_close_handle(&samr_handle);
+-	free(sid);
+-	return (status);
+-}
+-
+ 
+ /*
+  * sam_remove_trust_account
+@@ -194,7 +103,7 @@ sam_delete_account(char *server, char *domain_name, char *account_name)
+ 	mlsvc_handle_t domain_handle;
+ 	mlsvc_handle_t user_handle;
+ 	smb_account_t ainfo;
+-	struct samr_sid *sid;
++	smb_sid_t *sid;
+ 	DWORD access_mask;
+ 	DWORD status;
+ 	int rc;
+@@ -204,93 +113,44 @@ sam_delete_account(char *server, char *domain_name, char *account_name)
+ 
+ 	rc = samr_open(server, domain_name, user, SAM_LOOKUP_INFORMATION,
+ 	    &samr_handle);
+-
+ 	if (rc != 0)
+-		return (NT_STATUS_OPEN_FAILED);
+-
+-	sid = sam_get_domain_sid(&samr_handle, server, domain_name);
+-	status = samr_open_domain(&samr_handle, SAM_LOOKUP_INFORMATION, sid,
+-	    &domain_handle);
+-	free(sid);
+-	if (status != NT_STATUS_SUCCESS) {
+-		(void) samr_close_handle(&samr_handle);
+-		return (status);
+-	}
++		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
+ 
+-	status = samr_lookup_domain_names(&domain_handle, account_name, &ainfo);
+-	if (status == NT_STATUS_SUCCESS) {
+-		access_mask = STANDARD_RIGHTS_EXECUTE | DELETE;
+-		status = samr_open_user(&domain_handle, access_mask,
+-		    ainfo.a_rid, &user_handle);
+-		if (status == NT_STATUS_SUCCESS) {
+-			if (samr_delete_user(&user_handle) != 0)
+-				(void) samr_close_handle(&user_handle);
+-		}
++	sid = samr_lookup_domain(&samr_handle, domain_name);
++	if (sid == NULL) {
++		status = NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
++		goto out_samr_hdl;
+ 	}
+ 
+-	(void) samr_close_handle(&domain_handle);
+-	(void) samr_close_handle(&samr_handle);
+-	return (status);
+-}
+-
+-/*
+- * sam_check_user
+- *
+- * Check to see if user have permission to access computer account.
+- * The user being checked is the specified user for joining the Solaris
+- * host to the domain.
+- */
+-DWORD
+-sam_check_user(char *server, char *domain_name, char *account_name)
+-{
+-	mlsvc_handle_t samr_handle;
+-	mlsvc_handle_t domain_handle;
+-	mlsvc_handle_t user_handle;
+-	smb_account_t ainfo;
+-	struct samr_sid *sid;
+-	DWORD access_mask;
+-	DWORD status;
+-	int rc;
+-	char user[SMB_USERNAME_MAXLEN];
+-
+-	smb_ipc_get_user(user, SMB_USERNAME_MAXLEN);
+-
+-	rc = samr_open(server, domain_name, user, SAM_LOOKUP_INFORMATION,
+-	    &samr_handle);
++	status = samr_open_domain(&samr_handle, SAM_LOOKUP_INFORMATION,
++	    (struct samr_sid *)sid, &domain_handle);
++	if (status != NT_STATUS_SUCCESS)
++		goto out_sid_ptr;
+ 
+-	if (rc != 0)
+-		return (NT_STATUS_OPEN_FAILED);
++	status = samr_lookup_domain_names(&domain_handle, account_name, &ainfo);
++	if (status != NT_STATUS_SUCCESS)
++		goto out_dom_hdl;
+ 
+-	sid = sam_get_domain_sid(&samr_handle, server, domain_name);
+-	status = samr_open_domain(&samr_handle, SAM_LOOKUP_INFORMATION, sid,
+-	    &domain_handle);
+-	free(sid);
+-	if (status != NT_STATUS_SUCCESS) {
+-		(void) samr_close_handle(&samr_handle);
+-		return (status);
+-	}
++	access_mask = STANDARD_RIGHTS_EXECUTE | DELETE;
++	status = samr_open_user(&domain_handle, access_mask,
++	    ainfo.a_rid, &user_handle);
++	if (status != NT_STATUS_SUCCESS)
++		goto out_dom_hdl;
+ 
+-	status = samr_lookup_domain_names(&domain_handle, account_name, &ainfo);
+-	if (status == NT_STATUS_SUCCESS) {
+-		/*
+-		 * Win2000 client uses this access mask.  The
+-		 * following SAMR user specific rights bits are
+-		 * set: set password, set attributes, and get
+-		 * attributes.
+-		 */
+-
+-		access_mask = 0xb0;
+-		status = samr_open_user(&domain_handle,
+-		    access_mask, ainfo.a_rid, &user_handle);
+-		if (status == NT_STATUS_SUCCESS)
+-			(void) samr_close_handle(&user_handle);
+-	}
++	status = samr_delete_user(&user_handle);
+ 
++	(void) samr_close_handle(&user_handle);
++out_dom_hdl:
+ 	(void) samr_close_handle(&domain_handle);
++out_sid_ptr:
++	free(sid);
++out_samr_hdl:
+ 	(void) samr_close_handle(&samr_handle);
++
+ 	return (status);
+ }
+ 
++
+ /*
+  * sam_lookup_name
+  *
+@@ -372,54 +232,169 @@ sam_get_local_domains(char *server, char *domain_name)
+ }
+ 
+ /*
+- * sam_oem_password
++ * Set the account control flags on some account for which we
++ * have already opened a SAM handle with appropriate rights,
++ * passed in here as sam_handle, along with the new flags.
++ */
++DWORD
++netr_set_user_control(
++	mlsvc_handle_t *user_handle,
++	DWORD UserAccountControl)
++{
++	struct samr_SetUserInfo16 info;
++
++	info.UserAccountControl = UserAccountControl;
++	return (samr_set_user_info(user_handle, 16, &info));
++}
++
++/*
++ * Set the password on some account, for which we have already
++ * opened a SAM handle with appropriate rights, passed in here
++ * as sam_handle, along with the new password as cleartext.
+  *
+- * Generate an OEM password.
++ * This builds a struct SAMPR_USER_INTERNAL5_INFORMATION [MS-SAMR]
++ * containing the new password, encrypted with our session key.
+  */
+-int
+-sam_oem_password(oem_password_t *oem_password, unsigned char *new_password,
+-    unsigned char *old_password)
++DWORD
++netr_set_user_password(
++	mlsvc_handle_t *user_handle,
++	char *new_pw_clear)
++{
++	unsigned char ssn_key[SMBAUTH_HASH_SZ];
++	struct samr_SetUserInfo24 info;
++
++	if (ndr_rpc_get_ssnkey(user_handle, ssn_key, SMBAUTH_HASH_SZ))
++		return (NT_STATUS_INTERNAL_ERROR);
++
++	(void) memset(&info, 0, sizeof (info));
++	samr_make_encrypted_password(&info.encr_pw, new_pw_clear, ssn_key);
++
++	/* Rather not leave the session key around. */
++	(void) memset(ssn_key, 0, sizeof (ssn_key));
++
++	return (samr_set_user_info(user_handle, 24, &info));
++}
++
++/*
++ * Change a password like NetUserChangePassword(),
++ * but where we already know which AD server to use,
++ * so we don't request the domain name or search for
++ * an AD server for that domain here.
++ */
++DWORD
++netr_change_password(
++	char *server,
++	char *account,
++	char *old_pw_clear,
++	char *new_pw_clear)
+ {
+-	smb_wchar_t *unicode_password;
+-	int length;
++	struct samr_encr_passwd epw;
++	struct samr_encr_hash old_hash;
++	uint8_t old_nt_hash[SAMR_PWHASH_LEN];
++	uint8_t new_nt_hash[SAMR_PWHASH_LEN];
++	mlsvc_handle_t handle;
++	DWORD rc;
++
++	/*
++	 * Create an RPC handle to this server, bound to SAMR.
++	 */
++	rc = ndr_rpc_bind(&handle, server, "", "", "SAMR");
++	if (rc)
++		return (RPC_NT_SERVER_UNAVAILABLE);
++
++	/*
++	 * Encrypt the new p/w (plus random filler) with the
++	 * old password, and send the old p/w encrypted with
++	 * the new p/w hash to prove we know the old p/w.
++	 * Details:  [MS-SAMR 3.1.5.10.3]
++	 */
++	(void) smb_auth_ntlm_hash(old_pw_clear, old_nt_hash);
++	(void) smb_auth_ntlm_hash(new_pw_clear, new_nt_hash);
++	samr_make_encrypted_password(&epw, new_pw_clear, old_nt_hash);
+ 
+-#ifdef PBSHORTCUT
+-	assert(sizeof (oem_password_t) == SAM_PASSWORD_516);
+-#endif /* PBSHORTCUT */
++	(void) smb_auth_DES(old_hash.data, SAMR_PWHASH_LEN,
++	    new_nt_hash, 14, /* key */
++	    old_nt_hash, SAMR_PWHASH_LEN);
+ 
+-	length = strlen((char const *)new_password);
+-	unicode_password = alloca((length + 1) * sizeof (smb_wchar_t));
++	/*
++	 * Finally, ready to try the OtW call.
++	 */
++	rc = samr_change_password(
++	    &handle, server, account,
++	    &epw, &old_hash);
+ 
+-	length = smb_auth_qnd_unicode((unsigned short *)unicode_password,
+-	    (char *)new_password, length);
+-	oem_password->length = length;
++	/* Avoid leaving cleartext (or equivalent) around. */
++	(void) memset(old_nt_hash, 0, sizeof (old_nt_hash));
++	(void) memset(new_nt_hash, 0, sizeof (new_nt_hash));
+ 
+-	(void) memcpy(&oem_password->data[512 - length],
+-	    unicode_password, length);
++	ndr_rpc_unbind(&handle);
++	return (rc);
++}
+ 
+-	rand_hash((unsigned char *)oem_password, sizeof (oem_password_t),
+-	    old_password, SAM_KEYLEN);
++/*
++ * Build an encrypted password, as used by samr_set_user_info
++ * and samr_change_password.  Note: This builds the unencrypted
++ * form in one union arm, and encrypts it in the other union arm.
++ */
++void
++samr_make_encrypted_password(
++	struct samr_encr_passwd *epw,
++	char *new_pw_clear,
++	uint8_t *crypt_key)
++{
++	union {
++		struct samr_user_password u;
++		struct samr_encr_passwd e;
++	} pwu;
++
++	samr_fill_userpw(&pwu.u, new_pw_clear);
+ 
+-	return (0);
++	(void) smb_auth_RC4(pwu.e.data, sizeof (pwu.e.data),
++	    crypt_key, SAMR_PWHASH_LEN,
++	    pwu.e.data, sizeof (pwu.e.data));
++
++	(void) memcpy(epw->data, pwu.e.data, sizeof (pwu.e.data));
++	(void) memset(pwu.e.data, 0, sizeof (pwu.e.data));
+ }
+ 
+-static struct samr_sid *
+-sam_get_domain_sid(mlsvc_handle_t *samr_handle, char *server, char *domain_name)
++/*
++ * This fills in a samr_user_password (a.k.a. SAMPR_USER_PASSWORD
++ * in the MS Net API) which has the new password "right justified"
++ * in the buffer, and any space on the left filled with random junk
++ * to improve the quality of the encryption that is subsequently
++ * applied to this buffer before it goes over the wire.
++ */
++static void
++samr_fill_userpw(struct samr_user_password *upw, const char *new_pw)
+ {
+-	smb_sid_t *sid = NULL;
+-	smb_domainex_t domain;
+-
+-	if (ndr_rpc_server_os(samr_handle) == NATIVE_OS_WIN2000) {
+-		if (!smb_domain_getinfo(&domain)) {
+-			if (lsa_query_account_domain_info(server, domain_name,
+-			    &domain.d_primary) != NT_STATUS_SUCCESS)
+-				return (NULL);
+-		}
+-
+-		sid = smb_sid_fromstr(domain.d_primary.di_sid);
+-	} else {
+-		sid = samr_lookup_domain(samr_handle, domain_name);
+-	}
++	smb_wchar_t *pbuf;
++	uint32_t pwlen_bytes;
++	size_t pwlen_wchars;
++
++	/*
++	 * First fill the whole buffer with the random junk.
++	 * (Slightly less random when debugging:)
++	 */
++#ifdef DEBUG
++	(void) memset(upw->Buffer, '*', sizeof (upw->Buffer));
++#else
++	randomize((char *)upw->Buffer, sizeof (upw->Buffer));
++#endif
++
++	/*
++	 * Now overwrite the last pwlen characters of
++	 * that buffer with the password, and set the
++	 * length field so the receiving end knows where
++	 * the junk ends and the real password starts.
++	 */
++	pwlen_wchars = smb_wcequiv_strlen(new_pw) / 2;
++	if (pwlen_wchars > SAMR_USER_PWLEN)
++		pwlen_wchars = SAMR_USER_PWLEN;
++	pwlen_bytes = pwlen_wchars * 2;
++
++	pbuf = &upw->Buffer[SAMR_USER_PWLEN - pwlen_wchars];
++	(void) smb_mbstowcs(pbuf, new_pw, pwlen_wchars);
+ 
+-	return ((struct samr_sid *)sid);
++	/* Yes, this is in Bytes, not wchars. */
++	upw->Length = htolel(pwlen_bytes);
+ }
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/samlib.h b/usr/src/lib/smbsrv/libmlsvc/common/samlib.h
+index 3a3932e..7e8e1a4 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/samlib.h
++++ b/usr/src/lib/smbsrv/libmlsvc/common/samlib.h
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef _SAMLIB_H
+@@ -71,9 +72,9 @@ DWORD sam_check_user(char *, char *, char *);
+ /*
+  * samr_open.c
+  */
+-int samr_open(char *, char *, char *, DWORD, mlsvc_handle_t *);
+-int samr_connect(char *, char *, char *, DWORD, mlsvc_handle_t *);
+-int samr_close_handle(mlsvc_handle_t *);
++DWORD samr_open(char *, char *, char *, DWORD, mlsvc_handle_t *);
++DWORD samr_connect(char *, char *, char *, DWORD, mlsvc_handle_t *);
++void samr_close_handle(mlsvc_handle_t *);
+ DWORD samr_open_domain(mlsvc_handle_t *, DWORD, struct samr_sid *,
+     mlsvc_handle_t *);
+ DWORD samr_open_user(mlsvc_handle_t *, DWORD, DWORD, mlsvc_handle_t *);
+@@ -112,7 +113,7 @@ union samr_user_info {
+ 	} info9;
+ 
+ 	struct info16 {
+-		DWORD unknown;
++		DWORD acct_ctrl;
+ 	} info16;
+ };
+ 
+@@ -120,16 +121,39 @@ union samr_user_info {
+ smb_sid_t *samr_lookup_domain(mlsvc_handle_t *, char *);
+ DWORD samr_enum_local_domains(mlsvc_handle_t *);
+ uint32_t samr_lookup_domain_names(mlsvc_handle_t *, char *, smb_account_t *);
+-int samr_query_user_info(mlsvc_handle_t *, WORD, union samr_user_info *);
++DWORD samr_query_user_info(mlsvc_handle_t *, WORD, union samr_user_info *);
+ DWORD samr_get_user_pwinfo(mlsvc_handle_t *);
+ 
+-typedef struct oem_password {
+-	BYTE data[512];
+-	DWORD length;
+-} oem_password_t;
+-
+-
+-int sam_oem_password(oem_password_t *, unsigned char *, unsigned char *);
++DWORD
++samr_change_password(
++	mlsvc_handle_t *handle,
++	char *server,
++	char *account,
++	struct samr_encr_passwd *newpw,
++	struct samr_encr_hash *oldpw);
++
++DWORD
++samr_set_user_info(
++	mlsvc_handle_t *user_handle,
++	int info_level,
++	void *info_buf);
++
++DWORD
++netr_set_user_control(
++	mlsvc_handle_t *user_handle,
++	DWORD UserAccountControl);
++
++DWORD
++netr_set_user_password(
++	mlsvc_handle_t *user_handle,
++	char *new_pw_clear);
++
++DWORD
++netr_change_password(
++	char *server,
++	char *account,
++	char *old_password,
++	char *new_password);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/samr_clnt.c b/usr/src/lib/smbsrv/libmlsvc/common/samr_clnt.c
+index e19d1dfb..fc2956f 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/samr_clnt.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/samr_clnt.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -51,8 +52,6 @@
+ #include <smbsrv/smb_sid.h>
+ #include <samlib.h>
+ 
+-/*LINTED E_STATIC_UNUSED*/
+-static DWORD samr_connect1(char *, char *, char *, DWORD, mlsvc_handle_t *);
+ static DWORD samr_connect2(char *, char *, char *, DWORD, mlsvc_handle_t *);
+ static DWORD samr_connect4(char *, char *, char *, DWORD, mlsvc_handle_t *);
+ static DWORD samr_connect5(char *, char *, char *, DWORD, mlsvc_handle_t *);
+@@ -62,9 +61,6 @@ typedef DWORD (*samr_connop_t)(char *, char *, char *, DWORD,
+ 
+ static int samr_setup_user_info(WORD, struct samr_QueryUserInfo *,
+     union samr_user_info *);
+-static void samr_set_user_unknowns(struct samr_SetUserInfo23 *);
+-static void samr_set_user_logon_hours(struct samr_SetUserInfo *);
+-static int samr_set_user_password(unsigned char *, BYTE *);
+ 
+ /*
+  * samr_open
+@@ -78,17 +74,16 @@ static int samr_set_user_password(unsigned char *, BYTE *);
+  *
+  * On success 0 is returned. Otherwise a -ve error code.
+  */
+-int
++DWORD
+ samr_open(char *server, char *domain, char *username, DWORD access_mask,
+     mlsvc_handle_t *samr_handle)
+ {
+ 	smb_domainex_t di;
+-	int rc;
++	DWORD status;
+ 
+ 	if (server == NULL || domain == NULL) {
+ 		if (!smb_domain_getinfo(&di))
+-			return (-1);
+-
++			return (NT_STATUS_INTERNAL_ERROR);
+ 		server = di.d_dc;
+ 		domain = di.d_primary.di_nbname;
+ 	}
+@@ -96,8 +91,10 @@ samr_open(char *server, char *domain, char *username, DWORD access_mask,
+ 	if (username == NULL)
+ 		username = MLSVC_ANON_USER;
+ 
+-	rc = samr_connect(server, domain, username, access_mask, samr_handle);
+-	return (rc);
++	status = samr_connect(server, domain, username, access_mask,
++	    samr_handle);
++
++	return (status);
+ }
+ 
+ 
+@@ -116,7 +113,7 @@ samr_open(char *server, char *domain, char *username, DWORD access_mask,
+  * something other than an RPC protocol error.  We don't use the original
+  * connect call because all supported servers should support SamrConnect2.
+  */
+-int
++DWORD
+ samr_connect(char *server, char *domain, char *username, DWORD access_mask,
+     mlsvc_handle_t *samr_handle)
+ {
+@@ -130,60 +127,19 @@ samr_connect(char *server, char *domain, char *username, DWORD access_mask,
+ 	DWORD	status;
+ 	int	i;
+ 
+-	if (ndr_rpc_bind(samr_handle, server, domain, username, "SAMR") < 0)
+-		return (-1);
++	status = ndr_rpc_bind(samr_handle, server, domain, username, "SAMR");
++	if (status)
++		return (status);
+ 
+ 	for (i = 0; i < n_op; ++i) {
+ 		status = (*samr_connop[i])(server, domain, username,
+ 		    access_mask, samr_handle);
+ 
+ 		if (status == NT_STATUS_SUCCESS)
+-			return (0);
++			return (status);
+ 	}
+ 
+ 	ndr_rpc_unbind(samr_handle);
+-	return (-1);
+-}
+-
+-/*
+- * samr_connect1
+- *
+- * Original SAMR connect call; probably used on Windows NT 3.51.
+- * Windows 95 uses this call with the srvmgr tools update.
+- * Servername appears to be a dword rather than a string.
+- * The first word contains '\' and the second word contains 0x001,
+- * (which is probably uninitialized junk: 0x0001005c.
+- */
+-/*ARGSUSED*/
+-static DWORD
+-samr_connect1(char *server, char *domain, char *username, DWORD access_mask,
+-    mlsvc_handle_t *samr_handle)
+-{
+-	struct samr_Connect arg;
+-	int opnum;
+-	DWORD status;
+-
+-	bzero(&arg, sizeof (struct samr_Connect));
+-	opnum = SAMR_OPNUM_Connect;
+-	status = NT_STATUS_SUCCESS;
+-
+-	arg.servername = ndr_rpc_malloc(samr_handle, sizeof (DWORD));
+-	*(arg.servername) = 0x0001005c;
+-	arg.access_mask = access_mask;
+-
+-	if (ndr_rpc_call(samr_handle, opnum, &arg) != 0) {
+-		status = NT_STATUS_UNSUCCESSFUL;
+-	} else if (arg.status != 0) {
+-		status = NT_SC_VALUE(arg.status);
+-	} else {
+-		(void) memcpy(&samr_handle->handle, &arg.handle,
+-		    sizeof (ndr_hdid_t));
+-
+-		if (ndr_is_null_handle(samr_handle))
+-			status = NT_STATUS_INVALID_HANDLE;
+-	}
+-
+-	ndr_rpc_release(samr_handle);
+ 	return (status);
+ }
+ 
+@@ -293,23 +249,14 @@ samr_connect5(char *server, char *domain, char *username, DWORD access_mask,
+ 	int len;
+ 	int opnum;
+ 	DWORD status;
+-	smb_domainex_t dinfo;
+ 
+ 	bzero(&arg, sizeof (struct samr_Connect5));
+ 	opnum = SAMR_OPNUM_Connect5;
+ 	status = NT_STATUS_SUCCESS;
+ 
+-	if (!smb_domain_getinfo(&dinfo))
+-		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
+-
+-	len = strlen(server) + strlen(dinfo.d_primary.di_fqname) + 4;
++	len = strlen(server) + 4;
+ 	arg.servername = ndr_rpc_malloc(samr_handle, len);
+-
+-	if (*dinfo.d_primary.di_fqname != '\0')
+-		(void) snprintf((char *)arg.servername, len, "\\\\%s.%s",
+-		    server, dinfo.d_primary.di_fqname);
+-	else
+-		(void) snprintf((char *)arg.servername, len, "\\\\%s", server);
++	(void) snprintf((char *)arg.servername, len, "\\\\%s", server);
+ 
+ 	arg.access_mask = SAM_ENUM_LOCAL_DOMAIN;
+ 	arg.unknown2_00000001 = 0x00000001;
+@@ -342,14 +289,14 @@ samr_connect5(char *server, char *domain, char *username, DWORD access_mask,
+  * If the handle being closed is the top level connect handle, we unbind.
+  * Then we zero out the handle to invalidate it.
+  */
+-int
++void
+ samr_close_handle(mlsvc_handle_t *samr_handle)
+ {
+ 	struct samr_CloseHandle arg;
+ 	int opnum;
+ 
+ 	if (ndr_is_null_handle(samr_handle))
+-		return (-1);
++		return;
+ 
+ 	opnum = SAMR_OPNUM_CloseHandle;
+ 	bzero(&arg, sizeof (struct samr_CloseHandle));
+@@ -362,7 +309,6 @@ samr_close_handle(mlsvc_handle_t *samr_handle)
+ 		ndr_rpc_unbind(samr_handle);
+ 
+ 	bzero(samr_handle, sizeof (mlsvc_handle_t));
+-	return (0);
+ }
+ 
+ /*
+@@ -591,8 +537,8 @@ samr_create_user(mlsvc_handle_t *domain_handle, char *username,
+ 		status = NT_SC_VALUE(arg.status);
+ 
+ 		if (status != NT_STATUS_USER_EXISTS) {
+-			smb_tracef("SamrCreateUser[%s]: %s", username,
+-			    xlate_nt_status(status));
++			smb_tracef("SamrCreateUser[%s]: %s",
++			    username, xlate_nt_status(status));
+ 		}
+ 	} else {
+ 		ndr_inherit_handle(user_handle, domain_handle);
+@@ -637,8 +583,7 @@ samr_lookup_domain(mlsvc_handle_t *samr_handle, char *domain_name)
+ 	    sizeof (samr_handle_t));
+ 
+ 	length = smb_wcequiv_strlen(domain_name);
+-	if (ndr_rpc_server_os(samr_handle) == NATIVE_OS_WIN2000)
+-		length += sizeof (smb_wchar_t);
++	length += sizeof (smb_wchar_t);
+ 
+ 	arg.domain_name.length = length;
+ 	arg.domain_name.allosize = length;
+@@ -727,8 +672,7 @@ samr_lookup_domain_names(mlsvc_handle_t *domain_handle, char *name,
+ 	arg.total = 1;
+ 
+ 	length = smb_wcequiv_strlen(name);
+-	if (ndr_rpc_server_os(domain_handle) == NATIVE_OS_WIN2000)
+-		length += sizeof (smb_wchar_t);
++	length += sizeof (smb_wchar_t);
+ 
+ 	arg.name.length = length;
+ 	arg.name.allosize = length;
+@@ -760,18 +704,17 @@ samr_lookup_domain_names(mlsvc_handle_t *domain_handle, char *name,
+  * Query information on a specific user. The handle must be a valid
+  * user handle obtained via samr_open_user.
+  *
+- * Returns 0 on success, otherwise returns -ve error code.
++ * Returns 0 on success, otherwise returns NT status code.
+  */
+-int
++DWORD
+ samr_query_user_info(mlsvc_handle_t *user_handle, WORD switch_value,
+     union samr_user_info *user_info)
+ {
+ 	struct samr_QueryUserInfo	arg;
+ 	int	opnum;
+-	int	rc;
+ 
+ 	if (ndr_is_null_handle(user_handle) || user_info == 0)
+-		return (-1);
++		return (NT_STATUS_INTERNAL_ERROR);
+ 
+ 	opnum = SAMR_OPNUM_QueryUserInfo;
+ 	bzero(&arg, sizeof (struct samr_QueryUserInfo));
+@@ -780,18 +723,13 @@ samr_query_user_info(mlsvc_handle_t *user_handle, WORD switch_value,
+ 	    sizeof (samr_handle_t));
+ 	arg.switch_value = switch_value;
+ 
+-	if (ndr_rpc_call(user_handle, opnum, &arg) != 0) {
+-		ndr_rpc_release(user_handle);
+-		return (-1);
+-	}
++	if (ndr_rpc_call(user_handle, opnum, &arg) != 0)
++		arg.status = RPC_NT_CALL_FAILED;
+ 
+-	if (arg.status != 0)
+-		rc = -1;
+-	else
+-		rc = samr_setup_user_info(switch_value, &arg, user_info);
++	if (arg.status == 0)
++		(void) samr_setup_user_info(switch_value, &arg, user_info);
+ 
+-	ndr_rpc_release(user_handle);
+-	return (rc);
++	return (arg.status);
+ }
+ 
+ /*
+@@ -846,6 +784,8 @@ samr_setup_user_info(WORD switch_value,
+ 		return (0);
+ 
+ 	case 16:
++		user_info->info16.acct_ctrl =
++		    arg->ru.info16.UserAccountControl;
+ 		return (0);
+ 
+ 	default:
+@@ -945,6 +885,10 @@ samr_get_user_pwinfo(mlsvc_handle_t *user_handle)
+ 	return (status);
+ }
+ 
++DECL_FIXUP_STRUCT(samr_SetUserInfo_u);
++DECL_FIXUP_STRUCT(samr_SetUserInfo_s);
++DECL_FIXUP_STRUCT(samr_SetUserInfo);
++
+ /*
+  * samr_set_user_info
+  *
+@@ -952,138 +896,129 @@ samr_get_user_pwinfo(mlsvc_handle_t *user_handle)
+  * NT status codes observed so far:
+  *	NT_STATUS_WRONG_PASSWORD
+  */
+-/*ARGSUSED*/
+ DWORD
+-samr_set_user_info(mlsvc_handle_t *user_handle)
++samr_set_user_info(
++	mlsvc_handle_t *user_handle,
++	int info_level,
++	void *info_buf)
+ {
+-	unsigned char ssn_key[SMBAUTH_SESSION_KEY_SZ];
+ 	struct samr_SetUserInfo arg;
++	uint16_t usize, tsize;
+ 	int opnum;
+-	DWORD status = 0;
+ 
+ 	if (ndr_is_null_handle(user_handle))
+-		return (NT_STATUS_INVALID_PARAMETER);
++		return (NT_STATUS_INTERNAL_ERROR);
+ 
+-	if (ndr_rpc_get_ssnkey(user_handle, ssn_key, sizeof (ssn_key)))
+-		return (NT_STATUS_INVALID_PARAMETER);
++	/*
++	 * Only support a few levels
++	 * MS-SAMR: UserInternal4Information
++	 */
++	switch (info_level) {
++	case 16: /* samr_SetUserInfo16 */
++		usize = sizeof (struct samr_SetUserInfo16);
++		break;
++	case 21: /* samr_SetUserInfo21 */
++		usize = sizeof (struct samr_SetUserInfo21);
++		break;
++	case 23: /* samr_SetUserInfo23 */
++		usize = sizeof (struct samr_SetUserInfo23);
++		break;
++	case 24: /* samr_SetUserInfo24 */
++		usize = sizeof (struct samr_SetUserInfo24);
++		break;
++	default:
++		return (NT_STATUS_INVALID_LEVEL);
++	}
++
++	/*
++	 * OK, now this gets really ugly, because
++	 * ndrgen doesn't do unions correctly.
++	 */
++	FIXUP_PDU_SIZE(samr_SetUserInfo_u, usize);
++	tsize = usize + (2 * sizeof (WORD));
++	FIXUP_PDU_SIZE(samr_SetUserInfo_s, tsize);
++	tsize += sizeof (ndr_request_hdr_t) + sizeof (DWORD);
++	FIXUP_PDU_SIZE(samr_SetUserInfo, tsize);
+ 
+ 	opnum = SAMR_OPNUM_SetUserInfo;
+-	bzero(&arg, sizeof (struct samr_SetUserInfo));
++	bzero(&arg, sizeof (arg));
+ 	(void) memcpy(&arg.user_handle, &user_handle->handle,
+ 	    sizeof (samr_handle_t));
++	arg.info.info_level = info_level;
++	arg.info.switch_value = info_level;
++	(void) memcpy(&arg.info.ru, info_buf, usize);
+ 
+-	arg.info.index = SAMR_SET_USER_INFO_23;
+-	arg.info.switch_value = SAMR_SET_USER_INFO_23;
+-
+-	samr_set_user_unknowns(&arg.info.ru.info23);
+-	samr_set_user_logon_hours(&arg);
+-
+-	if (samr_set_user_password(ssn_key, arg.info.ru.info23.password) < 0)
+-		status = NT_STATUS_INTERNAL_ERROR;
+-
+-	if (ndr_rpc_call(user_handle, opnum, &arg) != 0) {
+-		status = NT_STATUS_INVALID_PARAMETER;
+-	} else if (arg.status != 0) {
++	if (ndr_rpc_call(user_handle, opnum, &arg) != 0)
++		arg.status = RPC_NT_CALL_FAILED;
++	else if (arg.status != 0)
+ 		ndr_rpc_status(user_handle, opnum, arg.status);
+-		status = NT_SC_VALUE(arg.status);
+-	}
+ 
+ 	ndr_rpc_release(user_handle);
+-	return (status);
+-}
+-
+-static void
+-samr_set_user_unknowns(struct samr_SetUserInfo23 *info)
+-{
+-	bzero(info, sizeof (struct samr_SetUserInfo23));
+-
+-	info->sd.length = 0;
+-	info->sd.data = 0;
+-	info->user_rid = 0;
+-	info->group_rid = DOMAIN_GROUP_RID_USERS;
+-
+-	/*
+-	 * The trust account value used here should probably
+-	 * match the one used to create the trust account.
+-	 */
+-	info->acct_info = SAMR_AF_WORKSTATION_TRUST_ACCOUNT;
+-	info->flags = 0x09F827FA;
++	return (arg.status);
+ }
+ 
+ /*
+- * samr_set_user_logon_hours
+- *
+- * SamrSetUserInfo appears to contain some logon hours information, which
+- * looks like a varying, conformant array. The top level contains a value
+- * (units), which probably indicates the how to interpret the array. The
+- * array definition looks like it contains a maximum size, an initial
+- * offset and a bit length (units/8), followed by the bitmap.
+- *
+- *  (info)
+- * +-------+
+- * | units |
+- * +-------+    (hours)
+- * | hours |-->+-----------+
+- * +-------+   | max_is    |
+- *             +-----------+
+- *             | first_is  |
+- *             +-----------+
+- *             | length_is |
+- *             +------------------------+
+- *             | bitmap[length_is]      |
+- *             +---------+--------------+
+- *
+- * 10080 minutes/week => 10080/8 = 1260 (0x04EC) bytes.
+- * 168 hours/week => 168/8 = 21 (0xA8) bytes.
+- * In the netmon examples seen so far, all bits are set to 1, i.e.
+- * an array containing 0xff. This is probably the default setting.
+- *
+- * ndrgen has a problem with complex [size_is] statements (length/8).
+- * So, for now, we fake it using two separate components.
++ * Client side wrapper for SamrUnicodeChangePasswordUser2
++ * [MS-SAMR 3.1.5.10.3]
+  */
+-static void
+-samr_set_user_logon_hours(struct samr_SetUserInfo *sui)
+-{
+-	sui->logon_hours.size = SAMR_HOURS_MAX_SIZE;
+-	sui->logon_hours.first = 0;
+-	sui->logon_hours.length = SAMR_SET_USER_HOURS_SZ;
+-	(void) memset(sui->logon_hours.bitmap, 0xFF, SAMR_SET_USER_HOURS_SZ);
+-
+-	sui->info.ru.info23.logon_info.units = SAMR_HOURS_PER_WEEK;
+-	sui->info.ru.info23.logon_info.hours =
+-	    (DWORD)(uintptr_t)sui->logon_hours.bitmap;
+-}
+ 
+-/*
+- * samr_set_user_password
+- *
+- * Set the initial password for the user.
+- *
+- * Returns 0 if everything goes well, -1 if there is trouble generating a
+- * key.
+- */
+-static int
+-samr_set_user_password(unsigned char *nt_key, BYTE *oem_password)
++DWORD
++samr_change_password(
++	mlsvc_handle_t *handle,
++	char *server,
++	char *account,
++	struct samr_encr_passwd *newpw,
++	struct samr_encr_hash *oldpw)
+ {
+-	char hostname[NETBIOS_NAME_SZ];
++	static struct samr_encr_passwd zero_newpw;
++	static struct samr_encr_hash zero_oldpw;
++	struct samr_ChangePasswordUser2 arg;
++	int opnum = SAMR_OPNUM_ChangePasswordUser2;
++	char *slashserver;
++	int len;
+ 
+-	randomize((char *)oem_password, SAMR_SET_USER_DATA_SZ);
++	(void) memset(&arg, 0, sizeof (arg));
+ 
+-	/*
+-	 * The new password is going to be the NetBIOS name of the system
+-	 * in lower case.
+-	 */
+-	if (smb_getnetbiosname(hostname, sizeof (hostname)) != 0)
+-		return (-1);
++	/* Need server name with slashes */
++	len = 2 + strlen(server) + 1;
++	slashserver = ndr_rpc_malloc(handle, len);
++	if (slashserver == NULL)
++		return (NT_STATUS_NO_MEMORY);
++	(void) snprintf(slashserver, len, "\\\\%s", server);
+ 
+-	(void) smb_strlwr(hostname);
++	arg.servername = ndr_rpc_malloc(handle, sizeof (samr_string_t));
++	if (arg.servername == NULL)
++		return (NT_STATUS_NO_MEMORY);
++	len = smb_wcequiv_strlen(slashserver);
++	if (len < 1)
++		return (NT_STATUS_INVALID_PARAMETER);
++	len += 2;	/* the WC null */
++	arg.servername->length = len;
++	arg.servername->allosize = len;
++	arg.servername->str = (uint8_t *)slashserver;
++
++	arg.username = ndr_rpc_malloc(handle, sizeof (samr_string_t));
++	if (arg.username == NULL)
++		return (NT_STATUS_NO_MEMORY);
++	len = smb_wcequiv_strlen(account);
++	if (len < 1)
++		return (NT_STATUS_INVALID_PARAMETER);
++	len += 2;	/* the WC null */
++	arg.username->length = len;
++	arg.username->allosize = len;
++	arg.username->str = (uint8_t *)account;
+ 
+-	/*
+-	 * Generate the OEM password from the hostname and the user session
+-	 * key(nt_key).
+-	 */
+-	/*LINTED E_BAD_PTR_CAST_ALIGN*/
+-	(void) sam_oem_password((oem_password_t *)oem_password,
+-	    (unsigned char *)hostname, nt_key);
+-	return (0);
++	arg.nt_newpw = newpw;
++	arg.nt_oldpw = oldpw;
++
++	arg.lm_newpw = &zero_newpw;
++	arg.lm_oldpw = &zero_oldpw;
++
++	if (ndr_rpc_call(handle, opnum, &arg) != 0)
++		arg.status = RPC_NT_CALL_FAILED;
++	else if (arg.status != 0)
++		ndr_rpc_status(handle, opnum, arg.status);
++
++	ndr_rpc_release(handle);
++	return (arg.status);
+ }
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/samr_svc.c b/usr/src/lib/smbsrv/libmlsvc/common/samr_svc.c
+index a057e92..8e0753c 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/samr_svc.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/samr_svc.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -1141,15 +1142,15 @@ samr_s_CreateUser(void *arg, ndr_xa_t *mxa)
+ }
+ 
+ /*
+- * samr_s_ChangeUserPasswd
++ * samr_s_ChangePasswordUser2
+  */
+ /*ARGSUSED*/
+ static int
+-samr_s_ChangeUserPasswd(void *arg, ndr_xa_t *mxa)
++samr_s_ChangePasswordUser2(void *arg, ndr_xa_t *mxa)
+ {
+-	struct samr_ChangeUserPasswd *param = arg;
++	struct samr_ChangePasswordUser2 *param = arg;
+ 
+-	bzero(param, sizeof (struct samr_ChangeUserPasswd));
++	bzero(param, sizeof (*param));
+ 	param->status = NT_SC_ERROR(NT_STATUS_ACCESS_DENIED);
+ 	return (NDR_DRC_OK);
+ }
+@@ -1860,7 +1861,7 @@ static ndr_stub_table_t samr_stub_table[] = {
+ 	{ samr_s_Connect2,		SAMR_OPNUM_Connect2 },
+ 	{ samr_s_GetUserPwInfo,		SAMR_OPNUM_GetUserPwInfo },
+ 	{ samr_s_CreateUser,		SAMR_OPNUM_CreateUser },
+-	{ samr_s_ChangeUserPasswd,	SAMR_OPNUM_ChangeUserPasswd },
++	{ samr_s_ChangePasswordUser2,	SAMR_OPNUM_ChangePasswordUser2 },
+ 	{ samr_s_GetDomainPwInfo,	SAMR_OPNUM_GetDomainPwInfo },
+ 	{ samr_s_SetUserInfo,		SAMR_OPNUM_SetUserInfo },
+ 	{ samr_s_Connect4,		SAMR_OPNUM_Connect4 },
+diff --git a/usr/src/lib/smbsrv/libmlsvc/common/smbrdr_glue.c b/usr/src/lib/smbsrv/libmlsvc/common/smbrdr_glue.c
+index 746acdf..ab127b6 100644
+--- a/usr/src/lib/smbsrv/libmlsvc/common/smbrdr_glue.c
++++ b/usr/src/lib/smbsrv/libmlsvc/common/smbrdr_glue.c
+@@ -20,8 +20,8 @@
+  */
+ 
+ /*
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -44,6 +44,12 @@
+ 
+ #include <assert.h>
+ 
++void
++smbrdr_initialize(void)
++{
++	(void) smb_lib_init();
++}
++
+ /*
+  * mlsvc_disconnect
+  *
+@@ -79,11 +85,9 @@ smbrdr_logon(char *srv, char *dom, char *user)
+ 	int err;
+ 
+ 	err = smbrdr_ctx_new(&ctx, srv, dom, user);
+-	if (err) {
+-		return (-1);
+-	}
+-	smb_ctx_free(ctx);
+-	return (AUTH_USER_GRANT);
++	if (err == 0)
++		smb_ctx_free(ctx);
++	return (err);
+ }
+ 
+ void
+@@ -111,12 +115,8 @@ smbrdr_ctx_new(struct smb_ctx **ctx_p, char *server,
+ 	assert(domain != NULL);
+ 	assert(user != NULL);
+ 
+-	/* Some callers pass this when they want a NULL session. */
+-	if (strcmp(user, "IPC$") == 0)
+-		user = "";
+-
+ 	if ((err = smb_ctx_alloc(&ctx)) != 0)
+-		return (err);
++		return (NT_STATUS_NO_MEMORY);
+ 
+ 	/*
+ 	 * Set server, share, domain, user
+@@ -150,12 +150,18 @@ smbrdr_ctx_new(struct smb_ctx **ctx_p, char *server,
+ 	 * Do lookup, connect, session setup, tree connect.
+ 	 * Or find and reuse a session/tree, if one exists.
+ 	 */
+-	if ((err = smb_ctx_resolve(ctx)) != 0)
++	if ((err = smb_ctx_resolve(ctx)) != 0) {
++		err = NT_STATUS_BAD_NETWORK_PATH;
+ 		goto errout;
+-	if ((err = smb_ctx_get_ssn(ctx)) != 0)
++	}
++	if ((err = smb_ctx_get_ssn(ctx)) != 0) {
++		err = NT_STATUS_NETWORK_ACCESS_DENIED;
+ 		goto errout;
+-	if ((err = smb_ctx_get_tree(ctx)) != 0)
++	}
++	if ((err = smb_ctx_get_tree(ctx)) != 0) {
++		err = NT_STATUS_BAD_NETWORK_NAME;
+ 		goto errout;
++	}
+ 
+ 	/* Success! */
+ 	*ctx_p = ctx;
+diff --git a/usr/src/lib/smbsrv/libsmb/Makefile.com b/usr/src/lib/smbsrv/libsmb/Makefile.com
+index dbf479e..bc371d4 100644
+--- a/usr/src/lib/smbsrv/libsmb/Makefile.com
++++ b/usr/src/lib/smbsrv/libsmb/Makefile.com
+@@ -20,6 +20,7 @@
+ #
+ #
+ # Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++# Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+ #
+ 
+ LIBRARY= libsmb.a
+@@ -76,8 +77,9 @@ INCS += -I$(SRC)/common/smbsrv
+ LINTCHECKFLAGS += -erroff=E_INCONS_ARG_DECL2
+ 
+ LDLIBS +=	$(MACH_LDLIBS)
+-LDLIBS +=	-lscf -lmd -luuid -lnsl -lpkcs11 -lsec -lsocket -lresolv
+-LDLIBS +=	-lidmap -lreparse -lnvpair -lcmdutils -lavl -lc
++LDLIBS +=	-lscf -lmd -luuid -lpkcs11 -lcryptoutil
++LDLIBS +=	-lsec -lidmap -lnsl -lsocket -lresolv
++LDLIBS +=	-lreparse -lnvpair -lcmdutils -lavl -lc
+ CPPFLAGS +=	$(INCS) -D_REENTRANT
+ CERRWARN +=	-_gcc=-Wno-uninitialized
+ CERRWARN +=	-_gcc=-Wno-char-subscripts
+diff --git a/usr/src/lib/smbsrv/libsmb/common/libsmb.h b/usr/src/lib/smbsrv/libsmb/common/libsmb.h
+index 8a11384..31a5aee 100644
+--- a/usr/src/lib/smbsrv/libsmb/common/libsmb.h
++++ b/usr/src/lib/smbsrv/libsmb/common/libsmb.h
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef	_LIBSMB_H
+@@ -189,6 +189,7 @@ extern int smb_config_setstr(smb_cfg_id_t, char *);
+ extern int smb_config_setnum(smb_cfg_id_t, int64_t);
+ extern int smb_config_setbool(smb_cfg_id_t, boolean_t);
+ 
++extern boolean_t smb_config_get_ads_enable(void);
+ extern uint8_t smb_config_get_fg_flag(void);
+ extern char *smb_config_get_localsid(void);
+ extern int smb_config_secmode_fromstr(char *);
+@@ -478,6 +479,8 @@ extern int smb_auth_hmac_md5(unsigned char *, int, unsigned char *, int,
+ 
+ extern int smb_auth_DES(unsigned char *, int, unsigned char *, int,
+     unsigned char *, int);
++extern int smb_auth_RC4(unsigned char *, int, unsigned char *, int,
++    unsigned char *, int);
+ 
+ extern int smb_auth_md4(unsigned char *, unsigned char *, int);
+ extern int smb_auth_lm_hash(const char *, unsigned char *);
+@@ -497,6 +500,8 @@ boolean_t smb_auth_validate_lm(unsigned char *, uint32_t, smb_passwd_t *,
+ boolean_t smb_auth_validate_nt(unsigned char *, uint32_t, smb_passwd_t *,
+     unsigned char *, int, char *, char *, uchar_t *);
+ 
++int smb_gen_random_passwd(char *passwd, size_t bufsz);
++
+ /*
+  * SMB authenticated IPC
+  */
+diff --git a/usr/src/lib/smbsrv/libsmb/common/mapfile-vers b/usr/src/lib/smbsrv/libsmb/common/mapfile-vers
+index 63f2543..4d2fc95 100644
+--- a/usr/src/lib/smbsrv/libsmb/common/mapfile-vers
++++ b/usr/src/lib/smbsrv/libsmb/common/mapfile-vers
+@@ -74,6 +74,7 @@ SYMBOL_VERSION SUNWprivate {
+ 	smb_acl_sort;
+ 	smb_acl_to_zfs;
+ 	smb_auth_DES;
++	smb_auth_RC4;
+ 	smb_auth_gen_session_key;
+ 	smb_auth_hmac_md5;
+ 	smb_auth_ntlm_hash;
+@@ -97,6 +98,7 @@ SYMBOL_VERSION SUNWprivate {
+ 	smb_common_decode;
+ 	smb_common_encode;
+ 	smb_config_get;
++	smb_config_get_ads_enable;
+ 	smb_config_get_execinfo;
+ 	smb_config_get_fg_flag;
+ 	smb_config_get_localsid;
+@@ -175,6 +177,7 @@ SYMBOL_VERSION SUNWprivate {
+ 	smb_fsacl_free;
+ 	smb_fssd_init;
+ 	smb_fssd_term;
++	smb_gen_random_passwd;
+ 	smb_get_dcinfo;
+ 	smb_get_nameservers;
+ 	smb_get_txid;
+diff --git a/usr/src/lib/smbsrv/libsmb/common/smb_auth.c b/usr/src/lib/smbsrv/libsmb/common/smb_auth.c
+index b53d109..9f4100e 100644
+--- a/usr/src/lib/smbsrv/libsmb/common/smb_auth.c
++++ b/usr/src/lib/smbsrv/libsmb/common/smb_auth.c
+@@ -21,15 +21,14 @@
+ /*
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #include <strings.h>
+ #include <stdlib.h>
+ #include <smbsrv/string.h>
+ #include <smbsrv/libsmb.h>
+-
+-extern void randomize(char *data, unsigned len);
+-static uint64_t unix_micro_to_nt_time(struct timeval *unix_time);
++#include <assert.h>
+ 
+ /*
+  * smb_auth_qnd_unicode
+@@ -145,15 +144,15 @@ int
+ smb_auth_ntlm_hash(const char *password, unsigned char *hash)
+ {
+ 	smb_wchar_t *unicode_password;
+-	int length;
++	int length, unicode_len;
+ 	int rc;
+ 
+ 	if (password == NULL || hash == NULL)
+ 		return (SMBAUTH_FAILURE);
+ 
+ 	length = strlen(password);
+-	unicode_password = (smb_wchar_t *)
+-	    malloc((length + 1) * sizeof (smb_wchar_t));
++	unicode_len = (length + 1) * sizeof (smb_wchar_t);
++	unicode_password = malloc(unicode_len);
+ 
+ 	if (unicode_password == NULL)
+ 		return (SMBAUTH_FAILURE);
+@@ -161,7 +160,9 @@ smb_auth_ntlm_hash(const char *password, unsigned char *hash)
+ 	length = smb_auth_qnd_unicode(unicode_password, password, length);
+ 	rc = smb_auth_md4(hash, (unsigned char *)unicode_password, length);
+ 
++	(void) memset(unicode_password, 0, unicode_len);
+ 	free(unicode_password);
++
+ 	return (rc);
+ }
+ 
+@@ -187,91 +188,6 @@ smb_auth_ntlm_response(unsigned char *hash,
+ }
+ 
+ /*
+- * smb_auth_gen_data_blob
+- *
+- * Fill the NTLMv2 data blob structure with information as described in
+- * "Implementing CIFS, The Common Internet File System". (pg. 282)
+- */
+-static void
+-smb_auth_gen_data_blob(smb_auth_data_blob_t *blob, char *ntdomain)
+-{
+-	struct timeval now;
+-
+-	(void) memset(blob->ndb_signature, 1, 2);
+-	(void) memset(&blob->ndb_signature[2], 0, 2);
+-	(void) memset(blob->ndb_reserved, 0, sizeof (blob->ndb_reserved));
+-
+-	(void) gettimeofday(&now, 0);
+-	blob->ndb_timestamp = unix_micro_to_nt_time(&now);
+-	randomize((char *)blob->ndb_clnt_challenge,
+-	    SMBAUTH_V2_CLNT_CHALLENGE_SZ);
+-	(void) memset(blob->ndb_unknown, 0, sizeof (blob->ndb_unknown));
+-	blob->ndb_names[0].nne_len = smb_auth_qnd_unicode(
+-	    blob->ndb_names[0].nne_name, ntdomain, strlen(ntdomain));
+-	blob->ndb_names[0].nne_type = SMBAUTH_NAME_TYPE_DOMAIN_NETBIOS;
+-	blob->ndb_names[1].nne_len = 0;
+-	blob->ndb_names[1].nne_type = SMBAUTH_NAME_TYPE_LIST_END;
+-	*blob->ndb_names[1].nne_name = 0;
+-	(void) memset(blob->ndb_unknown2, 0, sizeof (blob->ndb_unknown2));
+-}
+-
+-/*
+- * smb_auth_memcpy
+- *
+- * It increments the pointer to the destination buffer for the easy of
+- * concatenation.
+- */
+-static void
+-smb_auth_memcpy(unsigned char **dstbuf,
+-	unsigned char *srcbuf,
+-	int srcbuf_len)
+-{
+-	(void) memcpy(*dstbuf, srcbuf, srcbuf_len);
+-	*dstbuf += srcbuf_len;
+-}
+-
+-/*
+- * smb_auth_blob_to_string
+- *
+- * Prepare the data blob string which will be used in NTLMv2 response
+- * generation.
+- *
+- * Assumption: Caller must allocate big enough buffer to prevent buffer
+- * overrun.
+- *
+- * Returns the len of the data blob string.
+- */
+-static int
+-smb_auth_blob_to_string(smb_auth_data_blob_t *blob, unsigned char *data_blob)
+-{
+-	unsigned char *bufp = data_blob;
+-
+-	smb_auth_memcpy(&bufp, blob->ndb_signature,
+-	    sizeof (blob->ndb_signature));
+-	smb_auth_memcpy(&bufp, blob->ndb_reserved,
+-	    sizeof (blob->ndb_reserved));
+-	smb_auth_memcpy(&bufp, (unsigned char *)&blob->ndb_timestamp,
+-	    sizeof (blob->ndb_timestamp));
+-	smb_auth_memcpy(&bufp, blob->ndb_clnt_challenge,
+-	    SMBAUTH_V2_CLNT_CHALLENGE_SZ);
+-	smb_auth_memcpy(&bufp, blob->ndb_unknown, sizeof (blob->ndb_unknown));
+-	smb_auth_memcpy(&bufp, (unsigned char *)&blob->ndb_names[0].nne_type,
+-	    sizeof (blob->ndb_names[0].nne_type));
+-	smb_auth_memcpy(&bufp, (unsigned char *)&blob->ndb_names[0].nne_len,
+-	    sizeof (blob->ndb_names[0].nne_len));
+-	smb_auth_memcpy(&bufp, (unsigned char *)blob->ndb_names[0].nne_name,
+-	    blob->ndb_names[0].nne_len);
+-	smb_auth_memcpy(&bufp, (unsigned char *)&blob->ndb_names[1].nne_type,
+-	    sizeof (blob->ndb_names[1].nne_type));
+-	smb_auth_memcpy(&bufp, (unsigned char *)&blob->ndb_names[1].nne_len,
+-	    sizeof (blob->ndb_names[1].nne_len));
+-	smb_auth_memcpy(&bufp, blob->ndb_unknown2, sizeof (blob->ndb_unknown2));
+-
+-	/*LINTED E_PTRDIFF_OVERFLOW*/
+-	return (bufp - data_blob);
+-}
+-
+-/*
+  * smb_auth_ntlmv2_hash
+  *
+  * The NTLM v2 hash will be created from the given NTLM hash, username,
+@@ -360,102 +276,6 @@ smb_auth_v2_response(
+ }
+ 
+ /*
+- * smb_auth_set_info
+- *
+- * Fill the smb_auth_info instance with either NTLM or NTLMv2 related
+- * authentication information based on the LMCompatibilityLevel.
+- *
+- * If the LMCompatibilityLevel equals 2, the SMB Redirector will perform
+- * NTLM challenge/response authentication which requires the NTLM hash and
+- * NTLM response.
+- *
+- * If the LMCompatibilityLevel is 3 or above, the SMB Redirector will
+- * perfrom NTLMv2 challenge/response authenticatoin which requires the
+- * NTLM hash, NTLMv2 hash, NTLMv2 response and LMv2 response.
+- *
+- * Returns -1 on error. Otherwise, returns 0 upon success.
+- */
+-int
+-smb_auth_set_info(char *username,
+-	char *password,
+-	unsigned char *ntlm_hash,
+-	char *domain,
+-	unsigned char *srv_challenge_key,
+-	int srv_challenge_len,
+-	int lmcomp_lvl,
+-	smb_auth_info_t *auth)
+-{
+-	unsigned short blob_len;
+-	unsigned char blob_buf[SMBAUTH_BLOB_MAXLEN];
+-	int rc;
+-	char *uppercase_dom;
+-
+-	auth->lmcompatibility_lvl = lmcomp_lvl;
+-	if (lmcomp_lvl == 2) {
+-		auth->ci_len = 0;
+-		*auth->ci = 0;
+-		if (!ntlm_hash) {
+-			if (smb_auth_ntlm_hash(password, auth->hash) !=
+-			    SMBAUTH_SUCCESS)
+-				return (-1);
+-		} else {
+-			(void) memcpy(auth->hash, ntlm_hash, SMBAUTH_HASH_SZ);
+-		}
+-
+-		auth->cs_len = smb_auth_ntlm_response(auth->hash,
+-		    srv_challenge_key, srv_challenge_len, auth->cs);
+-	} else {
+-		if (!ntlm_hash) {
+-			if (smb_auth_ntlm_hash(password, auth->hash) !=
+-			    SMBAUTH_SUCCESS)
+-				return (-1);
+-		} else {
+-			(void) memcpy(auth->hash, ntlm_hash, SMBAUTH_HASH_SZ);
+-		}
+-
+-		if (!domain)
+-			return (-1);
+-
+-		if ((uppercase_dom = strdup(domain)) == NULL)
+-			return (-1);
+-
+-		(void) smb_strupr(uppercase_dom);
+-
+-		if (smb_auth_ntlmv2_hash(auth->hash, username,
+-		    uppercase_dom, auth->hash_v2) != SMBAUTH_SUCCESS) {
+-			free(uppercase_dom);
+-			return (-1);
+-		}
+-
+-		/* generate data blob */
+-		smb_auth_gen_data_blob(&auth->data_blob, uppercase_dom);
+-		free(uppercase_dom);
+-		blob_len = smb_auth_blob_to_string(&auth->data_blob, blob_buf);
+-
+-		/* generate NTLMv2 response */
+-		rc = smb_auth_v2_response(auth->hash_v2, srv_challenge_key,
+-		    srv_challenge_len, blob_buf, blob_len, auth->cs);
+-
+-		if (rc < 0)
+-			return (-1);
+-
+-		auth->cs_len = rc;
+-
+-		/* generate LMv2 response */
+-		rc = smb_auth_v2_response(auth->hash_v2, srv_challenge_key,
+-		    srv_challenge_len, auth->data_blob.ndb_clnt_challenge,
+-		    SMBAUTH_V2_CLNT_CHALLENGE_SZ, auth->ci);
+-
+-		if (rc < 0)
+-			return (-1);
+-
+-		auth->ci_len = rc;
+-	}
+-
+-	return (0);
+-}
+-
+-/*
+  * smb_auth_gen_session_key
+  *
+  * Generate the NTLM user session key if LMCompatibilityLevel is 2 or
+@@ -485,20 +305,6 @@ smb_auth_gen_session_key(smb_auth_info_t *auth, unsigned char *session_key)
+ 	return (rc);
+ }
+ 
+-/* 100's of ns between 1/1/1970 and 1/1/1601 */
+-#define	NT_TIME_BIAS    (134774LL * 24LL * 60LL * 60LL * 10000000LL)
+-
+-static uint64_t
+-unix_micro_to_nt_time(struct timeval *unix_time)
+-{
+-	uint64_t nt_time;
+-
+-	nt_time = unix_time->tv_sec;
+-	nt_time *= 10000000;  /* seconds to 100ns */
+-	nt_time += unix_time->tv_usec * 10;
+-	return (nt_time + NT_TIME_BIAS);
+-}
+-
+ static boolean_t
+ smb_lm_password_ok(
+     unsigned char *challenge,
+@@ -754,3 +560,42 @@ smb_auth_validate_nt(
+ 
+ 	return (ok);
+ }
++
++/*
++ * smb_gen_random_passwd(buf, len)
++ * Generate a random password of length len-1, and store it in buf,
++ * null terminated.  This is used as a machine account password,
++ * which we set when we join a domain.
++ *
++ * [MS-DISO] A machine password is an ASCII string of randomly chosen
++ * characters. Each character's ASCII code is between 32 and 122 inclusive.
++ * That's space through 'z'.
++ */
++
++int
++smb_gen_random_passwd(char *buf, size_t len)
++{
++	const uchar_t start = ' ';
++	const uchar_t modulus = 'z' - ' ' + 1;
++	uchar_t t;
++	int i;
++
++	/* Last byte is the null. */
++	len--;
++
++	/* Temporarily put random data in the caller's buffer. */
++	randomize(buf, len);
++
++	/* Convert the random data to printable characters. */
++	for (i = 0; i < len; i++) {
++		/* need unsigned math */
++		t = (uchar_t)buf[i];
++		t = (t % modulus) + start;
++		assert(' ' <= t && t <= 'z');
++		buf[i] = (char)t;
++	}
++
++	buf[len] = '\0';
++
++	return (0);
++}
+diff --git a/usr/src/lib/smbsrv/libsmb/common/smb_cfg.c b/usr/src/lib/smbsrv/libsmb/common/smb_cfg.c
+index 6270ca1..b59c582 100644
+--- a/usr/src/lib/smbsrv/libsmb/common/smb_cfg.c
++++ b/usr/src/lib/smbsrv/libsmb/common/smb_cfg.c
+@@ -739,6 +739,32 @@ smb_config_get_fg_flag()
+ }
+ 
+ /*
++ * smb_config_get_ads_enable
++ *
++ * Returns value of the "config/use_ads" parameter
++ * from the IDMAP SMF configuration repository.
++ *
++ */
++boolean_t
++smb_config_get_ads_enable(void)
++{
++	smb_scfhandle_t *handle = NULL;
++	uint8_t vbool;
++	int rc = 0;
++
++	handle = smb_smf_scf_init(IDMAP_FMRI_PREFIX);
++	if (handle == NULL)
++		return (B_FALSE);
++
++	rc = smb_smf_create_service_pgroup(handle, IDMAP_PG_NAME);
++	if (rc == SMBD_SMF_OK)
++		rc = smb_smf_get_boolean_property(handle, "use_ads", &vbool);
++	smb_smf_scf_fini(handle);
++
++	return ((rc == SMBD_SMF_OK) ? (vbool == 1) : B_FALSE);
++}
++
++/*
+  * smb_config_get_localsid
+  *
+  * Returns value of the "config/machine_sid" parameter
+diff --git a/usr/src/lib/smbsrv/libsmb/common/smb_crypt.c b/usr/src/lib/smbsrv/libsmb/common/smb_crypt.c
+index c6a95b7..7a1fb84 100644
+--- a/usr/src/lib/smbsrv/libsmb/common/smb_crypt.c
++++ b/usr/src/lib/smbsrv/libsmb/common/smb_crypt.c
+@@ -22,10 +22,9 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ #include <sys/md4.h>
+ #include <sys/types.h>
+ #include <string.h>
+@@ -37,6 +36,29 @@
+ static void smb_initlmkey(unsigned char *keyin, unsigned char *keyout);
+ 
+ /*
++ * randomize
++ *
++ * Randomize the contents of the specified buffer.
++ */
++void
++randomize(char *data, unsigned len)
++{
++	char *p = data;
++
++	if (pkcs11_get_random(data, len) == 0)
++		return;
++
++	/*
++	 * Implement a "fall back", because current callers
++	 * don't expect an error from this.  In practice,
++	 * we never use this fall back.
++	 */
++	while (len--) {
++		*p++ = (random() >> 24);
++	}
++}
++
++/*
+  * smb_auth_md4
+  *
+  * Compute an MD4 digest.
+@@ -122,13 +144,21 @@ smb_auth_DES(unsigned char *Result, int ResultLen,
+ 	int K, D;
+ 	int k, d;
+ 
+-	/* Calculate proper number of iterations */
++	/*
++	 * Calculate proper number of iterations.
++	 * Known call cases include:
++	 *   ResultLen=16, KeyLen=14, DataLen=8
++	 *   ResultLen=24, KeyLen=21, DataLen=8
++	 *   ResultLen=16, KeyLen=14, DataLen=16
++	 */
+ 	K = KeyLen / 7;
+ 	D = DataLen / 8;
+-
+-	if (ResultLen < (K * 8 * D)) {
+-		return (SMBAUTH_FAILURE);
+-	}
++	if ((KeyLen % 7) || (DataLen % 8))
++		return (EINVAL);
++	if (K == 0 || D == 0)
++		return (EINVAL);
++	if (ResultLen < (K * 8))
++		return (EINVAL);
+ 
+ 	/*
+ 	 * Use SUNW convenience function to initialize the cryptoki
+@@ -143,7 +173,10 @@ smb_auth_DES(unsigned char *Result, int ResultLen,
+ 		return (SMBAUTH_FAILURE);
+ 	}
+ 
+-	for (k = 0; k < K; k++) {
++	for (d = k = 0; k < K; k++, d++) {
++		/* Cycle the input again, as necessary. */
++		if (d == D)
++			d = 0;
+ 		smb_initlmkey(&Key[k * 7], des_key);
+ 		rv = SUNW_C_KeyToObject(hSession, mechanism.mechanism,
+ 		    des_key, 8, &hKey);
+@@ -157,18 +190,18 @@ smb_auth_DES(unsigned char *Result, int ResultLen,
+ 			error = 1;
+ 			goto exit_encrypt;
+ 		}
+-		ciphertext_len = DataLen;
+-		for (d = 0; d < D; d++) {
+-			/* Read in the data and encrypt this portion */
+-			rv = C_EncryptUpdate(hSession,
+-			    (CK_BYTE_PTR)Data + (d * 8), 8,
+-			    &Result[(k * (8 * D)) + (d * 8)],
+-			    &ciphertext_len);
+-			if (rv != CKR_OK) {
+-				error = 1;
+-				goto exit_encrypt;
+-			}
++		ciphertext_len = 8;
++
++		/* Read in the data and encrypt this portion */
++		rv = C_EncryptUpdate(hSession,
++		    (CK_BYTE_PTR)Data + (d * 8), 8,
++		    (CK_BYTE_PTR)Result + (k * 8),
++		    &ciphertext_len);
++		if (rv != CKR_OK) {
++			error = 1;
++			goto exit_encrypt;
+ 		}
++
+ 		(void) C_DestroyObject(hSession, hKey);
+ 	}
+ 	goto exit_session;
+@@ -204,3 +237,56 @@ smb_initlmkey(unsigned char *keyin, unsigned char *keyout)
+ 	for (i = 0; i < 8; i++)
+ 		keyout[i] = (keyout[i] << 1) & 0xfe;
+ }
++
++/*
++ * CKM_RC4
++ */
++int
++smb_auth_RC4(uchar_t *Result, int ResultLen,
++	uchar_t *Key, int KeyLen,
++	uchar_t *Data, int DataLen)
++{
++	CK_RV rv;
++	CK_MECHANISM mechanism;
++	CK_OBJECT_HANDLE hKey;
++	CK_SESSION_HANDLE hSession;
++	CK_ULONG ciphertext_len;
++	int error = SMBAUTH_FAILURE;
++
++	/*
++	 * Use SUNW convenience function to initialize the cryptoki
++	 * library, and open a session with a slot that supports
++	 * the mechanism we plan on using.
++	 */
++	mechanism.mechanism = CKM_RC4;
++	mechanism.pParameter = NULL;
++	mechanism.ulParameterLen = 0;
++	rv = SUNW_C_GetMechSession(mechanism.mechanism, &hSession);
++	if (rv != CKR_OK) {
++		return (SMBAUTH_FAILURE);
++	}
++
++	rv = SUNW_C_KeyToObject(hSession, mechanism.mechanism,
++	    Key, KeyLen, &hKey);
++	if (rv != CKR_OK)
++		goto exit_session;
++
++	/* Initialize the encryption operation in the session */
++	rv = C_EncryptInit(hSession, &mechanism, hKey);
++	if (rv != CKR_OK)
++		goto exit_encrypt;
++
++	ciphertext_len = ResultLen;
++	rv = C_EncryptUpdate(hSession,
++	    (CK_BYTE_PTR)Data, DataLen,
++	    (CK_BYTE_PTR)Result, &ciphertext_len);
++	if (rv == CKR_OK)
++		error = 0;
++
++exit_encrypt:
++	(void) C_DestroyObject(hSession, hKey);
++exit_session:
++	(void) C_CloseSession(hSession);
++
++	return (error);
++}
+diff --git a/usr/src/lib/smbsrv/libsmb/common/smb_util.c b/usr/src/lib/smbsrv/libsmb/common/smb_util.c
+index 3bd80e4..91bf0a7 100644
+--- a/usr/src/lib/smbsrv/libsmb/common/smb_util.c
++++ b/usr/src/lib/smbsrv/libsmb/common/smb_util.c
+@@ -20,7 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc. All rights reserved.
+  */
+ 
+ #include <ctype.h>
+@@ -328,29 +328,6 @@ trim_whitespace(char *buf)
+ }
+ 
+ /*
+- * randomize
+- *
+- * Randomize the contents of the specified buffer.
+- */
+-void
+-randomize(char *data, unsigned len)
+-{
+-	unsigned dwlen = len / 4;
+-	unsigned remlen = len % 4;
+-	unsigned tmp;
+-	unsigned i; /*LINTED E_BAD_PTR_CAST_ALIGN*/
+-	unsigned *p = (unsigned *)data;
+-
+-	for (i = 0; i < dwlen; ++i)
+-		*p++ = random();
+-
+-	if (remlen) {
+-		tmp = random();
+-		(void) memcpy(p, &tmp, remlen);
+-	}
+-}
+-
+-/*
+  * This is the hash mechanism used to encrypt passwords for commands like
+  * SamrSetUserInformation. It uses a 256 byte s-box.
+  */
+diff --git a/usr/src/lib/smbsrv/libsmbns/Makefile.com b/usr/src/lib/smbsrv/libsmbns/Makefile.com
+index 840d639..d148e11 100644
+--- a/usr/src/lib/smbsrv/libsmbns/Makefile.com
++++ b/usr/src/lib/smbsrv/libsmbns/Makefile.com
+@@ -48,8 +48,7 @@ SRCS=   $(OBJS_COMMON:%.o=$(SRCDIR)/%.c)	\
+ 	$(OBJS_SHARED:%.o=$(SRC)/common/smbsrv/%.c)
+ 
+ LDLIBS +=	$(MACH_LDLIBS)
+-LDLIBS +=	-lsmb -lgss -lcmdutils -lldap -lresolv -lnsl -lsocket
+-LDLIBS +=	-lc -lcryptoutil
++LDLIBS +=	-lsmb -lgss -lcmdutils -lldap -lresolv -lnsl -lsocket -lc
+ CPPFLAGS +=	-D_REENTRANT
+ CERRWARN +=	-_gcc=-Wno-unused-function
+ CERRWARN +=	-_gcc=-Wno-uninitialized
+diff --git a/usr/src/lib/smbsrv/libsmbns/common/libsmbns.h b/usr/src/lib/smbsrv/libsmbns/common/libsmbns.h
+index ba54279..95d16b1 100644
+--- a/usr/src/lib/smbsrv/libsmbns/common/libsmbns.h
++++ b/usr/src/lib/smbsrv/libsmbns/common/libsmbns.h
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef	_LIBSMBNS_H
+@@ -89,7 +90,7 @@ extern int smb_ads_lookup_share(smb_ads_handle_t *, const char *, const char *,
+     char *);
+ extern int smb_ads_add_share(smb_ads_handle_t *, const char *, const char *,
+     const char *);
+-extern smb_adjoin_status_t smb_ads_join(char *, char *, char *, char *, size_t);
++extern smb_adjoin_status_t smb_ads_join(char *, char *, char *, char *);
+ extern void smb_ads_join_errmsg(smb_adjoin_status_t);
+ extern boolean_t smb_ads_lookup_msdcs(char *, char *, char *, uint32_t);
+ extern smb_ads_host_info_t *smb_ads_find_host(char *, char *);
+diff --git a/usr/src/lib/smbsrv/libsmbns/common/smbns_ads.c b/usr/src/lib/smbsrv/libsmbns/common/smbns_ads.c
+index 5626d27..bcdfb8d 100644
+--- a/usr/src/lib/smbsrv/libsmbns/common/smbns_ads.c
++++ b/usr/src/lib/smbsrv/libsmbns/common/smbns_ads.c
+@@ -20,6 +20,7 @@
+  */
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #include <sys/param.h>
+@@ -62,13 +63,6 @@
+ #define	SMB_ADS_SHARE_NUM_ATTR 3
+ #define	SMB_ADS_SITE_MAX MAXHOSTNAMELEN
+ 
+-/*
+- * [MS-DISO] A machine password is an ASCII string of randomly chosen
+- * characters. Each character's ASCII code is between 32 and 122 inclusive.
+- */
+-#define	SMB_ADS_PWD_CHAR_NUM	91
+-#define	SMB_ADS_PWD_CHAR_START	32
+-
+ #define	SMB_ADS_MSDCS_SRV_DC_RR		"_ldap._tcp.dc._msdcs"
+ #define	SMB_ADS_MSDCS_SRV_SITE_RR	"_ldap._tcp.%s._sites.dc._msdcs"
+ 
+@@ -209,7 +203,6 @@ static smb_ads_qstat_t smb_ads_lookup_computer_n_attr(smb_ads_handle_t *,
+     smb_ads_avpair_t *, int, char *);
+ static int smb_ads_update_computer_cntrl_attr(smb_ads_handle_t *, int, char *);
+ static krb5_kvno smb_ads_lookup_computer_attr_kvno(smb_ads_handle_t *, char *);
+-static int smb_ads_gen_machine_passwd(char *, size_t);
+ static void smb_ads_free_cached_host(void);
+ static int smb_ads_alloc_attr(LDAPMod **, int);
+ static void smb_ads_free_attr(LDAPMod **);
+@@ -2145,39 +2138,6 @@ smb_ads_lookup_computer_attr_kvno(smb_ads_handle_t *ah, char *dn)
+ 	return (kvno);
+ }
+ 
+-static int
+-smb_ads_gen_machine_passwd(char *machine_passwd, size_t bufsz)
+-{
+-	int i;
+-	size_t pwdlen;
+-	uint8_t *random_bytes;
+-
+-	errno = 0;
+-	if (machine_passwd == NULL || bufsz == 0) {
+-		errno = EINVAL;
+-		return (-1);
+-	}
+-
+-	pwdlen = bufsz - 1;
+-	random_bytes = calloc(1, pwdlen);
+-	if (random_bytes == NULL)
+-		return (-1);
+-
+-	if (pkcs11_get_random(random_bytes, pwdlen) != 0) {
+-		free(random_bytes);
+-		return (-1);
+-	}
+-
+-	for (i = 0; i < pwdlen; i++)
+-		machine_passwd[i] = (random_bytes[i] % SMB_ADS_PWD_CHAR_NUM) +
+-		    SMB_ADS_PWD_CHAR_START;
+-
+-	machine_passwd[pwdlen] = 0;
+-	bzero(random_bytes, pwdlen);
+-	free(random_bytes);
+-	return (0);
+-}
+-
+ /*
+  * smb_ads_join
+  *
+@@ -2204,8 +2164,7 @@ smb_ads_gen_machine_passwd(char *machine_passwd, size_t bufsz)
+  * principal after the domain join operation.
+  */
+ smb_adjoin_status_t
+-smb_ads_join(char *domain, char *user, char *usr_passwd, char *machine_passwd,
+-    size_t len)
++smb_ads_join(char *domain, char *user, char *usr_passwd, char *machine_passwd)
+ {
+ 	smb_ads_handle_t *ah = NULL;
+ 	krb5_context ctx = NULL;
+@@ -2228,13 +2187,6 @@ smb_ads_join(char *domain, char *user, char *usr_passwd, char *machine_passwd,
+ 		return (SMB_ADJOIN_ERR_GET_HANDLE);
+ 	}
+ 
+-	if (smb_ads_gen_machine_passwd(machine_passwd, len) != 0) {
+-		syslog(LOG_NOTICE, "machine password generation: %m");
+-		smb_ads_close(ah);
+-		smb_ccache_remove(SMB_CCACHE_PATH);
+-		return (SMB_ADJOIN_ERR_GEN_PWD);
+-	}
+-
+ 	if ((dclevel = smb_ads_get_dc_level(ah)) == -1) {
+ 		smb_ads_close(ah);
+ 		smb_ccache_remove(SMB_CCACHE_PATH);
+@@ -2294,6 +2246,7 @@ smb_ads_join(char *domain, char *user, char *usr_passwd, char *machine_passwd,
+ 	cnt = spns.s_cnt;
+ 	smb_krb5_free_pn_set(&spns);
+ 
++	/* New machine_passwd was filled in by our caller. */
+ 	if (smb_krb5_setpwd(ctx, ah->domain, machine_passwd) != 0) {
+ 		rc = SMB_ADJOIN_ERR_KSETPWD;
+ 		goto adjoin_cleanup;
+@@ -2360,16 +2313,6 @@ adjoin_cleanup:
+ 		if (rename(tmpfile, SMBNS_KRB5_KEYTAB) != 0) {
+ 			(void) unlink(tmpfile);
+ 			rc = SMB_ADJOIN_ERR_COMMIT_KEYTAB;
+-		} else {
+-			/* Set IDMAP config */
+-			if (smb_config_set_idmap_domain(ah->domain) != 0) {
+-				rc = SMB_ADJOIN_ERR_IDMAP_SET_DOMAIN;
+-			} else {
+-
+-				/* Refresh IDMAP service */
+-				if (smb_config_refresh_idmap() != 0)
+-					rc = SMB_ADJOIN_ERR_IDMAP_REFRESH;
+-			}
+ 		}
+ 	} else {
+ 		(void) unlink(tmpfile);
+diff --git a/usr/src/uts/common/smbsrv/ndl/netlogon.ndl b/usr/src/uts/common/smbsrv/ndl/netlogon.ndl
+index 5619284..de6c190 100644
+--- a/usr/src/uts/common/smbsrv/ndl/netlogon.ndl
++++ b/usr/src/uts/common/smbsrv/ndl/netlogon.ndl
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef _MLSVC_NETR_NDL_
+@@ -57,6 +58,17 @@
+ #define NETR_OPNUM_DatabaseRedo			0x11
+ #define NETR_OPNUM_LogonControl2Ex		0x12
+ #define NETR_OPNUM_TrustDomainList		0x13
++#define NETR_OPNUM_DsrGetDcName			0x14
++#define NETR_OPNUM_LogonGetCapabilities		0x15
++#define NETR_OPNUM_LogonSetServiceBits		0x16
++#define NETR_OPNUM_LogonGetTrustRid		0x17
++#define NETR_OPNUM_LogonComputeServerDigest	0x18
++#define NETR_OPNUM_LogonComputeClientDigest	0x19
++#define NETR_OPNUM_ServerAuthenticate3		0x1A
++#define NETR_OPNUM_DsrGetDcNameEx		0x1B
++#define NETR_OPNUM_DsrGetSiteName		0x1C
++#define NETR_OPNUM_LogonGetDomainInfo		0x1D
++#define NETR_OPNUM_ServerPasswordSet2		0x1E
+ 
+ 
+ struct netr_sid {
+@@ -134,17 +146,25 @@ struct OLD_LARGE_INTEGER {
+ };
+ typedef struct OLD_LARGE_INTEGER netr_int64_t;
+ 
++struct CYPHER_BLOCK {
++	BYTE data[8];
++};
+ 
+ struct OWF_PASSWORD {
+ 	BYTE data[16];
+ };
+ typedef struct OWF_PASSWORD netr_owf_password_t;
+ 
+-
+-struct CYPHER_BLOCK {
+-	BYTE data[8];
++/*
++ * NL_TRUST_PASSWORD
++ * See also: samr_user_password
++ */
++#define NETR_TRUST_PWLEN	256
++struct netr_trust_password {
++	WORD	Buffer[NETR_TRUST_PWLEN];
++	DWORD	Length;
+ };
+-
++typedef struct netr_trust_password netr_trust_password_t;
+ 
+ struct USER_SESSION_KEY {
+ 	struct CYPHER_BLOCK data[2];
+@@ -198,10 +218,21 @@ OPERATION(NETR_OPNUM_ServerPasswordSet)
+ struct netr_PasswordSet {
+ 	IN		LPTSTR servername;
+ 	IN REFERENCE	LPTSTR account_name;
+-	IN		WORD account_type;
++	IN		WORD sec_chan_type;
++	IN REFERENCE	LPTSTR hostname;
++	INOUT	struct netr_authenticator auth;
++	IN		netr_owf_password_t owf_password;
++	OUT		DWORD status;
++};
++
++OPERATION(NETR_OPNUM_ServerPasswordSet2)
++struct netr_PasswordSet2 {
++	IN		LPTSTR servername;
++	IN REFERENCE	LPTSTR account_name;
++	IN		WORD sec_chan_type;
+ 	IN REFERENCE	LPTSTR hostname;
+ 	INOUT	struct netr_authenticator auth;
+-	IN		netr_owf_password_t uas_new_password;
++	IN		netr_trust_password_t trust_password;
+ 	OUT		DWORD status;
+ };
+ 
+@@ -398,6 +429,8 @@ union netr_interface {
+ 		struct netr_SamLogoff			SamLogoff;
+ 	CASE(NETR_OPNUM_ServerPasswordSet)
+ 		struct netr_PasswordSet			PasswordSet;
++	CASE(NETR_OPNUM_ServerPasswordSet2)
++		struct netr_PasswordSet2		PasswordSet2;
+ };
+ typedef union netr_interface netr_interface_t;
+ EXTERNTYPEINFO(netr_interface)
+diff --git a/usr/src/uts/common/smbsrv/ndl/samrpc.ndl b/usr/src/uts/common/smbsrv/ndl/samrpc.ndl
+index 5fe7a0f..2e4a932 100644
+--- a/usr/src/uts/common/smbsrv/ndl/samrpc.ndl
++++ b/usr/src/uts/common/smbsrv/ndl/samrpc.ndl
+@@ -18,8 +18,10 @@
+  *
+  * CDDL HEADER END
+  */
++
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+ #ifndef _MLSVC_SAM_NDL_
+@@ -89,10 +91,10 @@
+ #define	SAMR_OPNUM_AddMultipleAliasMembers	0x34
+ #define	SAMR_OPNUM_RemoveMultipleAliasMembers	0x35
+ #define	SAMR_OPNUM_ChangeUserOemPassword	0x36
+-#define SAMR_OPNUM_ChangeUserPasswd		0x37	/* UnicodePasswd */
++#define SAMR_OPNUM_ChangePasswordUser2		0x37	/* UnicodePasswd */
+ #define SAMR_OPNUM_GetDomainPwInfo		0x38
+ #define SAMR_OPNUM_Connect2                     0x39    /* SamrConnect2 */
+-#define SAMR_OPNUM_SetUserInfo			0x3a
++#define SAMR_OPNUM_SetUserInfo			0x3a	/* SetInfoUser2 */
+ #define	SAMR_OPNUM_SetBootKeyInformation	0x3b
+ #define	SAMR_OPNUM_GetBootKeyInformation	0x3c
+ #define	SAMR_OPNUM_Connect3			0x3d	/* NotUsedOnWire */
+@@ -111,15 +113,6 @@
+ 
+ 
+ /*
+- * UNION_INFO_ENT is intended to simplify adding new entries to a union.
+- * If the entry structures are named using the form samr_QueryUserInfoX,
+- * where X is the sitch_value, you can just add a single line. Note
+- * that you must also update the fixup function in mlsvc_sam.c.
+- */
+-#define UNION_INFO_ENT(N,NAME) CASE(N) struct NAME##N info##N
+-
+-
+-/*
+  * Sam account flags used when creating an account. These flags seem
+  * to be very similar to the USER_INFO_X flags (UF_XXX) in lmaccess.h
+  * but the values are different.
+@@ -181,6 +174,7 @@
+ #define	SAMR_USER_ALL_PRIVATEDATA		0x04000000
+ #define	SAMR_USER_ALL_PASSWORDEXPIRED		0x08000000
+ #define	SAMR_USER_ALL_SECURITYDESCRIPTOR	0x10000000
++#define	SAMR_USER_ALL_OWF_PASSWORD		0x20000000
+ #define	SAMR_USER_ALL_UNDEFINED_MASK		0xC0000000
+ 
+ /*
+@@ -204,6 +198,7 @@
+ /*
+  * Definition for a SID. The ndl compiler does not allow a typedef of
+  * a structure containing variable size members.
++ * Note: cast compatible with smb_sid_t, and code depends on that.
+  */
+ struct samr_sid {
+ 	BYTE		Revision;
+@@ -235,6 +230,7 @@ struct samr_sd {
+ typedef struct samr_sd samr_sd_t;
+ 
+ /*
++ * See RPC_STRING in the MS IDL.
+  * Definition for a string. The length and allosize should be set to
+  * twice the string length (i.e. strlen(str) * 2). The runtime code
+  * will perform the appropriate string to a wide-char conversions,
+@@ -355,9 +351,33 @@ struct samr_logon_hours_all {
+ 	BYTE	*hours;
+ };
+ 
+-struct samr_oem_password {
+-	BYTE password[512];
+-	DWORD length;
++/*
++ * SAMPR_USER_PASSWORD (in the MS Net API) or
++ * struct samr_user_password (internal use) is
++ * the "clear" form of struct samr_encr_passwd
++ * (SAMPR_ENCRYPTED_USER_PASSWORD in MS Net).
++ * It's not used by ndrgen, but is declared here
++ * to help clarify the relationship between these,
++ * and for the benefit of our client-side code.
++ */
++#ifndef	NDRGEN
++#define SAMR_USER_PWLEN	256
++struct samr_user_password {
++	smb_wchar_t	Buffer[SAMR_USER_PWLEN];
++	DWORD Length;
++};
++#endif	/* NDRGEN */
++
++/* SAMPR_ENCRYPTED_USER_PASSWORD */
++#define	SAMR_ENCR_PWLEN 516	/* sizeof samr_user_password */
++struct samr_encr_passwd {
++	BYTE data[SAMR_ENCR_PWLEN];
++};
++
++/* ENCRYPTED_NT_OWF_PASSWORD */
++#define	SAMR_PWHASH_LEN	16
++struct samr_encr_hash {
++	BYTE data[SAMR_PWHASH_LEN];
+ };
+ 
+ /*
+@@ -437,10 +457,16 @@ OPERATION(SAMR_OPNUM_Connect5)
+ struct samr_Connect5 {
+ 	IN		LPTSTR servername;
+ 	IN		DWORD access_mask;
+-	INOUT	DWORD unknown2_00000001;
+-	INOUT	DWORD unknown3_00000001;
+-	INOUT	DWORD unknown4_00000003;
+-	INOUT	DWORD unknown5_00000000;
++	/*
++	 * This should be a union, but instead this is
++	 * done this way because unions are hard to
++	 * express in this RPC implementation.
++	 */
++	INOUT	DWORD unknown2_00000001;	/* V1 */
++	INOUT	DWORD unknown3_00000001;	/* V1 */
++	/* SAMPR_REVISION_INFO_V1 */
++	INOUT	DWORD unknown4_00000003;	/* Revision */
++	INOUT	DWORD unknown5_00000000;	/* SupportedFeatures */
+ 	OUT		samr_handle_t handle;
+ 	OUT		DWORD status;
+ };
+@@ -895,7 +921,7 @@ struct samr_QueryUserInfo9 {
+ 
+ 
+ struct samr_QueryUserInfo16 {
+-	DWORD unknown;
++	DWORD UserAccountControl;
+ };
+ 
+ /*
+@@ -937,6 +963,7 @@ struct samr_QueryUserInfo21 {
+ 	BYTE			PrivateDataSensitive;
+ };
+ 
++/* See also: fixup_samr_QueryUserInfo() */
+ union QueryUserInfo_result_u {
+ 	UNION_INFO_ENT(1,samr_QueryUserInfo);
+ 	UNION_INFO_ENT(6,samr_QueryUserInfo);
+@@ -1204,27 +1231,20 @@ struct samr_CreateUser {
+ 
+ /*
+  ***********************************************************************
+- * ChangeUserPasswd
++ * ChangePasswordUser2 - See:
++ * SamrUnicodeChangePasswordUser2 [MS-SAMR 3.1.5.10.3]
+  ***********************************************************************
+  */
+-struct samr_newpasswd {
+-	BYTE data[516];
+-};
+-
+-
+-struct samr_oldpasswd {
+-	BYTE data[16];
+-};
+-
+ 
+-OPERATION(SAMR_OPNUM_ChangeUserPasswd)
+-struct samr_ChangeUserPasswd {
+-	IN	LPTSTR servername;
+-	IN	LPTSTR username;
+-	IN	struct samr_newpasswd *nt_newpasswd;
+-	IN	struct samr_oldpasswd *nt_oldpasswd;
+-	IN	struct samr_newpasswd *lm_newpasswd;
+-	IN	struct samr_oldpasswd *lm_oldpasswd;
++OPERATION(SAMR_OPNUM_ChangePasswordUser2)
++struct samr_ChangePasswordUser2 {
++	IN	samr_string_t *servername;
++	IN REF	samr_string_t *username;
++	IN	struct samr_encr_passwd *nt_newpw;
++	IN	struct samr_encr_hash *nt_oldpw;
++	IN	BYTE lm_present;
++	IN	struct samr_encr_passwd *lm_newpw;
++	IN	struct samr_encr_hash *lm_oldpw;
+ 	OUT	DWORD status;
+ };
+ 
+@@ -1245,172 +1265,112 @@ struct samr_GetDomainPwInfo {
+ /*
+  ***********************************************************************
+  * SetUserInfo
+- *
+- *	+++ 20 byte user handle and the union switch_value +++
+- *	00 00 00 00 77 F2 DD D5 66 48 D4 11 AD 5F D1 CD
+- *	18 43 7A DF 17 00 17 00
+- *
+- *	+++ 14 dwords (56 bytes) of zeros +++
+- *	00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+- *	00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+- *	00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+- *	00 00 00 00 00 00 00 00
+- *
+- *	+++ 9 sets of something - 72 bytes +++
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *	00 00 02 00 D0 04 8A 77
+- *
+- *	+++ 9 DWORD zeros +++
+- *	00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+- *	00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+- *	00 00 00 00
+- *
+- *	+++ miscellaneous +++
+- *	01 02 00 00
+- *	80 00 00 00
+- *	FA 27 F8 09
+- *	A8 00 00 00 70 F1 14 00
+- *	00 00 00 00 00 00 00 00 00 00 00 00
+- *
+- *	+++ encrypted password buffer - 512 bytes +++
+- *	76 68 E8 AA 23 4F 62 C4 81 4E 30 B8 92 29 66 B9
+- *	12 FF 3A 84 82 3A 55 0F C7 18 EA 56 86 50 D7 C5
+- *	43 BA 9C F8 32 D4 E0 15 74 A1 6F E1 59 C2 F2 95
+- *	53 A9 F2 68 9F 7F 29 B9 88 4C 65 A5 C1 DC 0B 44
+- *	B8 3C ED 74 D1 6A F7 09 66 97 94 6B 2C 3A A5 88
+- *	39 34 C6 FE 24 59 30 2D CF 6D 7F D5 EC B1 9A 84
+- *	E6 57 96 29 40 32 FB 62 9D 93 E2 BE D8 A3 74 88
+- *	8B 85 BC A0 76 D6 C9 DB 8C AF 81 BD 8A F0 08 8D
+- *	23 B0 52 FD 69 DE EF A1 36 E5 30 19 BD DA 67 A3
+- *	81 BD 3F D0 2A A2 8F 60 62 B0 8D 34 9E A4 4F 20
+- *	4E 79 93 82 58 A8 E5 6F 7A DC 12 13 33 E6 74 02
+- *	4C 32 F9 FC 1A E1 C5 0D E2 CC 36 8D FC 72 87 DD
+- *	6C 44 E3 6F 4B FD 46 10 08 89 E5 64 B8 27 14 83
+- *	E7 08 DE CF 69 C7 E1 40 63 DF CB 67 95 73 03 1B
+- *	CA 99 E1 1B 53 2A 89 6B 30 39 CD 5C DF A0 8A 1C
+- *	4E 50 74 7C 6D 3D E7 EA E9 B2 97 DD 38 7B DA EC
+- *	1A AD DA CE C4 58 9B 29 F3 6D 30 70 4E 63 6D 84
+- *	DB DC 5B CD 9A 4E 57 9C E4 65 5D 4F 76 E3 C7 52
+- *	8B 3B 20 0A 3B 4C 4B B1 2E 5B 4D AB BA 2F 45 6A
+- *	CA 17 AD 9F C0 B2 07 FB 56 7F E4 3F 9F D4 C6 8C
+- *	A1 05 BF 53 42 1E 67 F4 57 54 E3 2C 38 CF E1 94
+- *	75 69 F7 4E 5C 74 CC B3 FD EF 73 3F D5 28 22 EC
+- *	9B 40 E1 1D 65 44 7C BB 69 88 57 10 05 3A C5 48
+- *	8E 4F 77 DB 1A 5C 49 9C D5 06 00 AC 79 BC 7E 89
+- *	B0 01 66 70 88 A2 E5 DF 96 DC 75 98 10 12 45 02
+- *	33 35 6C DF 74 8B 14 2F 26 C6 FD 7A B4 D0 A6 7D
+- *	DE 2B 13 44 EF 34 46 4D 9D 3E C3 75 BC 11 B4 41
+- *	27 58 25 1E AF AA F0 BB DA 27 7A 1E AE 81 1A 78
+- *	44 19 DE FC C4 7C 4E 32 44 F7 57 2A 41 A2 85 DC
+- *	C0 AD 5D 6B 58 FD 2E 75 25 B9 F2 B6 19 82 E5 0E
+- *	B6 69 0D C1 27 A9 B6 40 A6 50 49 E5 CB 17 98 65
+- *	88 18 CA E4 1D 2E 20 F7 DE 8E 7D F2 9D A5 6B CD
+- *
+- *	D6 79 45 71
+- *
+- *	+++ table of 9 things +++
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *	01 00 00 00 00 00 00 00 00 00 00 00
+- *
+- *	+++ miscellaneous +++
+- *	EC 04 00 00 00 00 00 00 15 00 00 00
+- *	FF FF FF FF FF FF FF FF FF FF FF FF
+- *	FF FF FF FF FF FF FF FF FF
+- *
++ * [MS-SAMR] SamrSetInformationUser2
+  ***********************************************************************
+  */
+ 
+-#define SAMR_SET_USER_INFO_23		23
+-#define SAMR_SET_USER_DATA_SZ		516
++/* USER_CONTROL_INFORMATION */
++struct samr_SetUserInfo16 {
++	DWORD UserAccountControl;
++};
++
++
++/*
++ * samr_SetUserInfo21, a.k.a
++ * SAMR_USER_ALL_INFORMATION
++ *
++ * We now know this is the same as samr_QueryUserInfo21
++ * Could merge, except for the samr_vcbuf_t mess.
++ */
++
++#define SAMR_SET_USER_INFO_21		21
++
++struct samr_SetUserInfo21 {
++	samr_quad_t		LastLogon;
++	samr_quad_t		LastLogoff;
++	samr_quad_t		PasswordLastSet;
++	samr_quad_t		AccountExpires;
++	samr_quad_t		PasswordCanChange;
++	samr_quad_t		PasswordMustChange;
++
++	samr_vcbuf_t		UserName;
++	samr_vcbuf_t		FullName;
++	samr_vcbuf_t		HomeDirectory;
++	samr_vcbuf_t		HomeDirectoryDrive;
++	samr_vcbuf_t		ScriptPath;
++	samr_vcbuf_t		ProfilePath;
++	samr_vcbuf_t		AdminComment;
++	samr_vcbuf_t		WorkStations;
++	samr_vcbuf_t		UserComment;
++	samr_vcbuf_t		Parameters;
++
++	struct samr_short_blob	LmOwfPassword;
++	struct samr_short_blob	NtOwfPassword;
++	samr_vcbuf_t		PrivateData;
++	samr_sd_t		SecurityDescriptor;
++
++	DWORD			UserId;	/* RID */
++	DWORD			PrimaryGroupId;
++	DWORD			UserAccountControl;
++	DWORD			WhichFields;
+ 
+-struct samr_SetUserInfo23 {
+-	samr_quad_t logon_time;			/* 00 00 00 00 00 00 00 00 */
+-	samr_quad_t logoff_time;		/* 00 00 00 00 00 00 00 00 */
+-	samr_quad_t kickoff_time;		/* 00 00 00 00 00 00 00 00 */
+-	samr_quad_t passwd_last_set_time;	/* 00 00 00 00 00 00 00 00 */
+-	samr_quad_t passwd_can_change_time;	/* 00 00 00 00 00 00 00 00 */
+-	samr_quad_t passwd_must_change_time;	/* 00 00 00 00 00 00 00 00 */
+-
+-	samr_vcbuf_t user_name;			/* 00 00 00 00 00 00 00 00 */
+-	samr_vcbuf_t full_name;			/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t home_dir;			/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t home_drive;		/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t logon_script;		/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t profile_path;		/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t acct_desc;			/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t workstations;		/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t unknown1;			/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t unknown2;			/* 00 00 02 00 D0 04 8A 77 */
+-	samr_vcbuf_t lm_password;		/* 00 00 00 00 00 00 00 00 */
+-	samr_vcbuf_t nt_password;		/* 00 00 00 00 00 00 00 00 */
+-	samr_vcbuf_t unknown3;			/* 00 00 00 00 00 00 00 00 */
+-
+-	struct samr_sd sd;			/* 00 00 00 00 00 00 00 00 */
+-	DWORD user_rid;				/* 00 00 00 00 */
+-	DWORD group_rid;			/* 01 02 00 00 */
+-	DWORD acct_info;			/* 80 00 00 00 */
+-	DWORD flags;				/* FA 27 F8 09 */
+-	struct samr_logon_info logon_info;  /* A8 00 00 00 70 F1 14 00->0xFF */
+ 	/*
+-	 * The following 12 bytes are encoded in Ethereal as:
+-	 *
+-	 *	WORD bad_pwd_count;
+-	 *	WORD logon_count;
+-	 *
+-	 *	WORD country;			(default 0)
+-	 *	WORD codepage;
+-	 *
+-	 *	BYTE nt_pwd_set;
+-	 *	BYTE lm_pwd_set;
+-	 *	BYTE expired_flag;
+-	 *	BYTE unknown_char;
++	 * This should be samr_logon_hours_all, but apparently
++	 * ndrgen doesn't get that quite right, so instead, the
++	 * client-side code patches this up.
+ 	 */
+-	DWORD unknown4_zero;			/* 00 00 00 00 */
+-	DWORD unknown5_zero;			/* 00 00 00 00 */
+-	DWORD unknown6_zero;			/* 00 00 00 00 */
+-	BYTE password[SAMR_SET_USER_DATA_SZ];
++	struct samr_logon_info	LogonHours;
++
++	WORD			BadPasswordCount;
++	WORD			LogonCount;
++	WORD			CountryCode;
++	WORD			CodePage;
++	BYTE			LmPasswordPresent;
++	BYTE			NtPasswordPresent;
++	BYTE			PasswordExpired;
++	BYTE			PrivateDataSensitive;
++};
++
++/*
++ *	SAMPR_USER_INTERNAL4_INFORMATION
++ *	UserInternal4Information (23)
++ */
++#define SAMR_SET_USER_INFO_23		23
++struct samr_SetUserInfo23 {
++	struct samr_SetUserInfo21 info21;
++	struct samr_encr_passwd encr_pw;
++};
++
++/*
++ *	SAMPR_USER_INTERNAL5_INFORMATION
++ *	UserInternal5Information (24)
++ */
++#define SAMR_SET_USER_INFO_24		24
++struct samr_SetUserInfo24 {
++	struct samr_encr_passwd encr_pw;
++	BYTE password_expired;
+ };
+ 
+ 
+ union samr_SetUserInfo_u {
++	UNION_INFO_ENT(16,samr_SetUserInfo);
++	UNION_INFO_ENT(21,samr_SetUserInfo);
+ 	UNION_INFO_ENT(23,samr_SetUserInfo);
+-	DEFAULT	char *nullptr;
++	UNION_INFO_ENT(24,samr_SetUserInfo);
++	DEFAULT  DWORD nothing;
+ };
+ 
+-
+ struct samr_SetUserInfo_s {
+-	WORD index;
++	WORD info_level;
+ 	WORD switch_value;
+   SWITCH(switch_value)
+ 	union samr_SetUserInfo_u ru;
+ };
+ 
+-
+-/*
+-	IN	DWORD unknown_04EC;
+-	IN	DWORD unknown_zero;
+-	IN	DWORD logon_bitmap_size;
+-	IN	BYTE logon_bitmap[SAMR_SET_USER_HOURS_SZ];
+-*/
+ OPERATION(SAMR_OPNUM_SetUserInfo)
+ struct samr_SetUserInfo {
+ 	IN	samr_handle_t user_handle;
+ 	IN	struct samr_SetUserInfo_s info;
+-	IN	struct samr_logon_hours logon_hours;
+ 	OUT	DWORD status;
+ };
+ 
+@@ -1458,8 +1418,8 @@ union samr_interface {
+ 		struct samr_GetUserPwInfo	GetUserPwInfo;
+ 	CASE(SAMR_OPNUM_CreateUser)
+ 		struct samr_CreateUser		CreateUser;
+-	CASE(SAMR_OPNUM_ChangeUserPasswd)
+-		struct samr_ChangeUserPasswd	ChangeUserPasswd;
++	CASE(SAMR_OPNUM_ChangePasswordUser2)
++		struct samr_ChangePasswordUser2	ChangePasswordUser2;
+ 	CASE(SAMR_OPNUM_GetDomainPwInfo)
+ 		struct samr_GetDomainPwInfo	GetDomainPwInfo;
+ 	CASE(SAMR_OPNUM_Connect2)
+-- 
+1.8.3.1
+

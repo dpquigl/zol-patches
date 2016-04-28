@@ -1,0 +1,85 @@
+From 892586e8a147c02d7f4053cc405229a13e796928 Mon Sep 17 00:00:00 2001
+From: ilovezfs <ilovezfs@icloud.com>
+Date: Thu, 28 Jan 2016 04:51:19 -0800
+Subject: [PATCH] 6585 sha512, skein, and edonr have an unenforced dependency
+ on extensible dataset Reviewed by: Matthew Ahrens <mahrens@delphix.com>
+ Reviewed by: Richard Laager <rlaager@wiktel.com> Approved by: Robert
+ Mustacchi <rm@joyent.com>
+
+---
+ usr/src/common/zfs/zfeature_common.c | 20 +++++++++++++++++---
+ usr/src/man/man5/zpool-features.5    |  6 +++---
+ 2 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/usr/src/common/zfs/zfeature_common.c b/usr/src/common/zfs/zfeature_common.c
+index 1c80f2f..8bd91d7 100644
+--- a/usr/src/common/zfs/zfeature_common.c
++++ b/usr/src/common/zfs/zfeature_common.c
+@@ -234,16 +234,30 @@ zpool_feature_init(void)
+ 	    "Support for blocks larger than 128KB.",
+ 	    ZFEATURE_FLAG_PER_DATASET, large_blocks_deps);
+ 
++	static const spa_feature_t sha512_deps[] = {
++		SPA_FEATURE_EXTENSIBLE_DATASET,
++		SPA_FEATURE_NONE
++	};
+ 	zfeature_register(SPA_FEATURE_SHA512,
+ 	    "org.illumos:sha512", "sha512",
+ 	    "SHA-512/256 hash algorithm.",
+-	    ZFEATURE_FLAG_PER_DATASET, NULL);
++	    ZFEATURE_FLAG_PER_DATASET, sha512_deps);
++
++	static const spa_feature_t skein_deps[] = {
++		SPA_FEATURE_EXTENSIBLE_DATASET,
++		SPA_FEATURE_NONE
++	};
+ 	zfeature_register(SPA_FEATURE_SKEIN,
+ 	    "org.illumos:skein", "skein",
+ 	    "Skein hash algorithm.",
+-	    ZFEATURE_FLAG_PER_DATASET, NULL);
++	    ZFEATURE_FLAG_PER_DATASET, skein_deps);
++
++	static const spa_feature_t edonr_deps[] = {
++		SPA_FEATURE_EXTENSIBLE_DATASET,
++		SPA_FEATURE_NONE
++	};
+ 	zfeature_register(SPA_FEATURE_EDONR,
+ 	    "org.illumos:edonr", "edonr",
+ 	    "Edon-R hash algorithm.",
+-	    ZFEATURE_FLAG_PER_DATASET, NULL);
++	    ZFEATURE_FLAG_PER_DATASET, edonr_deps);
+ }
+diff --git a/usr/src/man/man5/zpool-features.5 b/usr/src/man/man5/zpool-features.5
+index cc94fa1..c2196ec 100644
+--- a/usr/src/man/man5/zpool-features.5
++++ b/usr/src/man/man5/zpool-features.5
+@@ -455,7 +455,7 @@ filesystems that have ever had their recordsize larger than 128KB are destroyed.
+ l l .
+ GUID	org.illumos:sha512
+ READ\-ONLY COMPATIBLE	no
+-DEPENDENCIES	none
++DEPENDENCIES	extensible_dataset
+ .TE
+ 
+ This feature enables the use of the SHA-512/256 truncated hash algorithm
+@@ -488,7 +488,7 @@ the updated GRUB stage2 module is installed).
+ l l .
+ GUID	org.illumos:skein
+ READ\-ONLY COMPATIBLE	no
+-DEPENDENCIES	none
++DEPENDENCIES	extensible_dataset
+ .TE
+ 
+ This feature enables the use of the Skein hash algorithm for checksum
+@@ -524,7 +524,7 @@ error.
+ l l .
+ GUID	org.illumos:edonr
+ READ\-ONLY COMPATIBLE	no
+-DEPENDENCIES	none
++DEPENDENCIES	extensible_dataset
+ .TE
+ 
+ This feature enables the use of the Edon-R hash algorithm for checksum,
+-- 
+1.8.3.1
+

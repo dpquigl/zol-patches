@@ -1,0 +1,42 @@
+From 0f92170f1ec2737ee5a0e51b5f74093904811452 Mon Sep 17 00:00:00 2001
+From: Dan McDonald <danmcd@omniti.com>
+Date: Thu, 30 Jul 2015 22:17:35 -0400
+Subject: [PATCH] 6093 zfsctl_shares_lookup should only VN_RELE() on zfs_zget()
+ success Reviewed by: Gordon Ross <gwr@nexenta.com> Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Reviewed by: George Wilson
+ <george.wilson@delphix.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ module/zfs/zfs_ctldir.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/module/zfs/zfs_ctldir.c b/module/zfs/zfs_ctldir.c
+index cd852c4..de2f948 100644
+--- a/module/zfs/zfs_ctldir.c
++++ b/module/zfs/zfs_ctldir.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
+  */
+ 
+ /*
+@@ -966,11 +967,12 @@ zfsctl_shares_lookup(vnode_t *dvp, char *nm, vnode_t **vpp, pathname_t *pnp,
+ 		ZFS_EXIT(zfsvfs);
+ 		return (SET_ERROR(ENOTSUP));
+ 	}
+-	if ((error = zfs_zget(zfsvfs, zfsvfs->z_shares_dir, &dzp)) == 0)
++	if ((error = zfs_zget(zfsvfs, zfsvfs->z_shares_dir, &dzp)) == 0) {
+ 		error = VOP_LOOKUP(ZTOV(dzp), nm, vpp, pnp,
+ 		    flags, rdir, cr, ct, direntflags, realpnp);
++		VN_RELE(ZTOV(dzp));
++	}
+ 
+-	VN_RELE(ZTOV(dzp));
+ 	ZFS_EXIT(zfsvfs);
+ 
+ 	return (error);
+-- 
+1.8.3.1
+

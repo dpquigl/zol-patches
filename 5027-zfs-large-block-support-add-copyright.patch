@@ -1,0 +1,739 @@
+From c3d26abc9ee97b4f60233556aadeb57e0bd30bb9 Mon Sep 17 00:00:00 2001
+From: Matthew Ahrens <matt@mahrens.org>
+Date: Sun, 7 Feb 2016 11:06:19 -0800
+Subject: [PATCH] 5027 zfs large block support (add copyright)
+
+---
+ cmd/zdb/zdb.c                           | 1 +
+ cmd/zfs/zfs_main.c                      | 1 +
+ cmd/zstreamdump/zstreamdump.c           | 1 +
+ cmd/ztest/ztest.c                       | 1 +
+ usr/src/common/zfs/zfeature_common.c            | 1 +
+ usr/src/common/zfs/zfeature_common.h            | 1 +
+ usr/src/common/zfs/zfs_prop.c                   | 1 +
+ usr/src/common/zfs/zpool_prop.c                 | 1 +
+ usr/src/grub/grub-0.97/stage2/fsys_zfs.c        | 1 +
+ usr/src/grub/grub-0.97/stage2/zfs-include/spa.h | 1 +
+ include/libzfs.h              | 1 +
+ lib/libzfs/libzfs_dataset.c      | 1 +
+ lib/libzfs/libzfs_sendrecv.c     | 1 +
+ lib/libzfs_core/libzfs_core.c    | 1 +
+ include/libzfs_core.h    | 1 +
+ man/man8/zfs.8                        | 1 +
+ usr/src/man/man5/zpool-features.5               | 1 +
+ module/zfs/bpobj.c               | 1 +
+ module/zfs/bptree.c              | 1 +
+ module/zfs/dbuf.c                | 1 +
+ module/zfs/dmu_objset.c          | 1 +
+ module/zfs/dmu_send.c            | 1 +
+ module/zfs/dmu_tx.c              | 1 +
+ module/zfs/dnode.c               | 1 +
+ module/zfs/dsl_dataset.c         | 1 +
+ module/zfs/dsl_deadlist.c        | 1 +
+ module/zfs/dsl_destroy.c         | 1 +
+ module/zfs/dsl_pool.c            | 1 +
+ module/zfs/metaslab.c            | 1 +
+ module/zfs/sa.c                  | 1 +
+ module/zfs/spa.c                 | 1 +
+ module/zfs/spa_history.c         | 1 +
+ module/zfs/spa_misc.c            | 1 +
+ include/sys/dmu.h             | 1 +
+ include/sys/dmu_objset.h      | 1 +
+ include/sys/dmu_send.h        | 1 +
+ include/sys/dsl_dataset.h     | 1 +
+ include/sys/spa.h             | 1 +
+ include/sys/zap_impl.h        | 1 +
+ include/sys/zfs_ioctl.h       | 1 +
+ include/sys/zfs_znode.h       | 1 +
+ include/sys/zil.h             | 1 +
+ include/sys/zil_impl.h        | 1 +
+ module/zfs/vdev.c                | 1 +
+ module/zfs/vdev_queue.c          | 1 +
+ module/zfs/vdev_raidz.c          | 1 +
+ module/zfs/zap_micro.c           | 1 +
+ module/zfs/zfs_ioctl.c           | 1 +
+ module/zfs/zfs_log.c             | 1 +
+ module/zfs/zfs_vfsops.c          | 1 +
+ module/zfs/zfs_vnops.c           | 1 +
+ module/zfs/zfs_znode.c           | 1 +
+ module/zfs/zil.c                 | 1 +
+ module/zfs/zio.c                 | 1 +
+ module/zfs/zvol.c                | 1 +
+ include/sys/fs/zfs.h                 | 1 +
+ 56 files changed, 56 insertions(+)
+
+diff --git a/cmd/zdb/zdb.c b/cmd/zdb/zdb.c
+index 5746d64..4d609a7 100644
+--- a/cmd/zdb/zdb.c
++++ b/cmd/zdb/zdb.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <stdio.h>
+diff --git a/cmd/zfs/zfs_main.c b/cmd/zfs/zfs_main.c
+index fc83862..8676b37 100644
+--- a/cmd/zfs/zfs_main.c
++++ b/cmd/zfs/zfs_main.c
+@@ -26,6 +26,7 @@
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland.  All rights reserved.
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <assert.h>
+diff --git a/cmd/zstreamdump/zstreamdump.c b/cmd/zstreamdump/zstreamdump.c
+index 4d884c7..3b390a4 100644
+--- a/cmd/zstreamdump/zstreamdump.c
++++ b/cmd/zstreamdump/zstreamdump.c
+@@ -26,6 +26,7 @@
+ 
+ /*
+  * Copyright (c) 2013, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <ctype.h>
+diff --git a/cmd/ztest/ztest.c b/cmd/ztest/ztest.c
+index 764008f..0b238eb 100644
+--- a/cmd/ztest/ztest.c
++++ b/cmd/ztest/ztest.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /*
+diff --git a/usr/src/common/zfs/zfeature_common.c b/usr/src/common/zfs/zfeature_common.c
+index a001255..1c80f2f 100644
+--- a/usr/src/common/zfs/zfeature_common.c
++++ b/usr/src/common/zfs/zfeature_common.c
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2014, Nexenta Systems, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifdef _KERNEL
+diff --git a/usr/src/common/zfs/zfeature_common.h b/usr/src/common/zfs/zfeature_common.h
+index 6b229ae..528ff42 100644
+--- a/usr/src/common/zfs/zfeature_common.h
++++ b/usr/src/common/zfs/zfeature_common.h
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef _ZFEATURE_COMMON_H
+diff --git a/usr/src/common/zfs/zfs_prop.c b/usr/src/common/zfs/zfs_prop.c
+index 0d48670..b1413aa 100644
+--- a/usr/src/common/zfs/zfs_prop.c
++++ b/usr/src/common/zfs/zfs_prop.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/usr/src/common/zfs/zpool_prop.c b/usr/src/common/zfs/zpool_prop.c
+index 4d906b0..9c71744 100644
+--- a/usr/src/common/zfs/zpool_prop.c
++++ b/usr/src/common/zfs/zpool_prop.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zio.h>
+diff --git a/usr/src/grub/grub-0.97/stage2/fsys_zfs.c b/usr/src/grub/grub-0.97/stage2/fsys_zfs.c
+index f9bc6fd..5c3cf6c 100644
+--- a/usr/src/grub/grub-0.97/stage2/fsys_zfs.c
++++ b/usr/src/grub/grub-0.97/stage2/fsys_zfs.c
+@@ -25,6 +25,7 @@
+ /*
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /*
+diff --git a/usr/src/grub/grub-0.97/stage2/zfs-include/spa.h b/usr/src/grub/grub-0.97/stage2/zfs-include/spa.h
+index deb52cf..822f67c 100644
+--- a/usr/src/grub/grub-0.97/stage2/zfs-include/spa.h
++++ b/usr/src/grub/grub-0.97/stage2/zfs-include/spa.h
+@@ -24,6 +24,7 @@
+ 
+ /*
+  * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef _SYS_SPA_H
+diff --git a/include/libzfs.h b/include/libzfs.h
+index cbfcc54..68f9f6f 100644
+--- a/include/libzfs.h
++++ b/include/libzfs.h
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef	_LIBZFS_H
+diff --git a/lib/libzfs/libzfs_dataset.c b/lib/libzfs/libzfs_dataset.c
+index 55f263b..39e7d6d 100644
+--- a/lib/libzfs/libzfs_dataset.c
++++ b/lib/libzfs/libzfs_dataset.c
+@@ -27,6 +27,7 @@
+  * Copyright (c) 2013 Martin Matuska. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <ctype.h>
+diff --git a/lib/libzfs/libzfs_sendrecv.c b/lib/libzfs/libzfs_sendrecv.c
+index bc91979..ef659ff 100644
+--- a/lib/libzfs/libzfs_sendrecv.c
++++ b/lib/libzfs/libzfs_sendrecv.c
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <assert.h>
+diff --git a/lib/libzfs_core/libzfs_core.c b/lib/libzfs_core/libzfs_core.c
+index 1013cf0..76a0798 100644
+--- a/lib/libzfs_core/libzfs_core.c
++++ b/lib/libzfs_core/libzfs_core.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /*
+diff --git a/include/libzfs_core.h b/include/libzfs_core.h
+index d2d7917..938afbb 100644
+--- a/include/libzfs_core.h
++++ b/include/libzfs_core.h
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef	_LIBZFS_CORE_H
+diff --git a/man/man8/zfs.8 b/man/man8/zfs.8
+index 63cb918..baff748 100644
+--- a/man/man8/zfs.8
++++ b/man/man8/zfs.8
+@@ -26,6 +26,7 @@
+ .\" Copyright (c) 2014, Joyent, Inc. All rights reserved.
+ .\" Copyright (c) 2014 by Adam Stevko. All rights reserved.
+ .\" Copyright 2015 Nexenta Systems, Inc.  All Rights Reserved.
++.\" Copyright (c) 2014 Integros [integros.com]
+ .\"
+ .Dd June 8, 2015
+ .Dt ZFS 1M
+diff --git a/usr/src/man/man5/zpool-features.5 b/usr/src/man/man5/zpool-features.5
+index a80fc34..cc94fa1 100644
+--- a/usr/src/man/man5/zpool-features.5
++++ b/usr/src/man/man5/zpool-features.5
+@@ -2,6 +2,7 @@
+ .\" Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ .\" Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+ .\" Copyright (c) 2014, Joyent, Inc. All rights reserved.
++.\" Copyright (c) 2014 Integros [integros.com]
+ .\" The contents of this file are subject to the terms of the Common Development
+ .\" and Distribution License (the "License").  You may not use this file except
+ .\" in compliance with the License. You can obtain a copy of the license at
+diff --git a/module/zfs/bpobj.c b/module/zfs/bpobj.c
+index 7a747b3..c706a38 100644
+--- a/module/zfs/bpobj.c
++++ b/module/zfs/bpobj.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/bpobj.h>
+diff --git a/module/zfs/bptree.c b/module/zfs/bptree.c
+index b2b9887..a69fcc3 100644
+--- a/module/zfs/bptree.c
++++ b/module/zfs/bptree.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/arc.h>
+diff --git a/module/zfs/dbuf.c b/module/zfs/dbuf.c
+index 8b0c71d..9b462fd 100644
+--- a/module/zfs/dbuf.c
++++ b/module/zfs/dbuf.c
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/dmu_objset.c b/module/zfs/dmu_objset.c
+index 85465ec..367dbcb 100644
+--- a/module/zfs/dmu_objset.c
++++ b/module/zfs/dmu_objset.c
+@@ -26,6 +26,7 @@
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+  * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
+  * Copyright (c) 2015, STRATO AG, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/module/zfs/dmu_send.c b/module/zfs/dmu_send.c
+index 73ca5a9..6112765 100644
+--- a/module/zfs/dmu_send.c
++++ b/module/zfs/dmu_send.c
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2014, Joyent, Inc. All rights reserved.
+  * Copyright 2014 HybridCluster. All rights reserved.
+  * Copyright 2016 RackTop Systems.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/dmu.h>
+diff --git a/module/zfs/dmu_tx.c b/module/zfs/dmu_tx.c
+index 50885ac..15b9459 100644
+--- a/module/zfs/dmu_tx.c
++++ b/module/zfs/dmu_tx.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/dmu.h>
+diff --git a/module/zfs/dnode.c b/module/zfs/dnode.c
+index 31ba4de..024c648 100644
+--- a/module/zfs/dnode.c
++++ b/module/zfs/dnode.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/dsl_dataset.c b/module/zfs/dsl_dataset.c
+index 31dc0df..0605ccc 100644
+--- a/module/zfs/dsl_dataset.c
++++ b/module/zfs/dsl_dataset.c
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2014, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2014 RackTop Systems.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/dmu_objset.h>
+diff --git a/module/zfs/dsl_deadlist.c b/module/zfs/dsl_deadlist.c
+index d26c6cd..7e3a122 100644
+--- a/module/zfs/dsl_deadlist.c
++++ b/module/zfs/dsl_deadlist.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012 by Delphix. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/dsl_dataset.h>
+diff --git a/module/zfs/dsl_destroy.c b/module/zfs/dsl_destroy.c
+index 7de9845..b897176 100644
+--- a/module/zfs/dsl_destroy.c
++++ b/module/zfs/dsl_destroy.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright (c) 2013 by Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/dsl_pool.c b/module/zfs/dsl_pool.c
+index ddd8e73..ee2d8ee 100644
+--- a/module/zfs/dsl_pool.c
++++ b/module/zfs/dsl_pool.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/dsl_pool.h>
+diff --git a/module/zfs/metaslab.c b/module/zfs/metaslab.c
+index 852534e..9030b85 100644
+--- a/module/zfs/metaslab.c
++++ b/module/zfs/metaslab.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/sa.c b/module/zfs/sa.c
+index ff27c72..7ddf806 100644
+--- a/module/zfs/sa.c
++++ b/module/zfs/sa.c
+@@ -24,6 +24,7 @@
+  * Portions Copyright 2011 iXsystems, Inc
+  * Copyright (c) 2013 by Delphix. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 912053d..1edac65 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2015, Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+  * Copyright 2013 Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /*
+diff --git a/module/zfs/spa_history.c b/module/zfs/spa_history.c
+index 4923e3c..4c30736 100644
+--- a/module/zfs/spa_history.c
++++ b/module/zfs/spa_history.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2006, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/spa.h>
+diff --git a/module/zfs/spa_misc.c b/module/zfs/spa_misc.c
+index 6f255df..699b15c 100644
+--- a/module/zfs/spa_misc.c
++++ b/module/zfs/spa_misc.c
+@@ -24,6 +24,7 @@
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+  * Copyright 2013 Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/include/sys/dmu.h b/include/sys/dmu.h
+index c108069..adad5ab 100644
+--- a/include/sys/dmu.h
++++ b/include/sys/dmu.h
+@@ -28,6 +28,7 @@
+  * Copyright 2014 HybridCluster. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+  * Copyright 2013 Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/include/sys/dmu_objset.h b/include/sys/dmu_objset.h
+index 8a263a3..f05b2cf 100644
+--- a/include/sys/dmu_objset.h
++++ b/include/sys/dmu_objset.h
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/include/sys/dmu_send.h b/include/sys/dmu_send.h
+index 871f562..21d9cb4 100644
+--- a/include/sys/dmu_send.h
++++ b/include/sys/dmu_send.h
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef _DMU_SEND_H
+diff --git a/include/sys/dsl_dataset.h b/include/sys/dsl_dataset.h
+index d7df05b..766ae3c 100644
+--- a/include/sys/dsl_dataset.h
++++ b/include/sys/dsl_dataset.h
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef	_SYS_DSL_DATASET_H
+diff --git a/include/sys/spa.h b/include/sys/spa.h
+index 7ac7839..d8840bf 100644
+--- a/include/sys/spa.h
++++ b/include/sys/spa.h
+@@ -24,6 +24,7 @@
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
+  * Copyright 2013 Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef _SYS_SPA_H
+diff --git a/include/sys/zap_impl.h b/include/sys/zap_impl.h
+index acc795c..e05534f 100644
+--- a/include/sys/zap_impl.h
++++ b/include/sys/zap_impl.h
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2013 by Delphix. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef	_SYS_ZAP_IMPL_H
+diff --git a/include/sys/zfs_ioctl.h b/include/sys/zfs_ioctl.h
+index 5d3d2d9..3bc1a90 100644
+--- a/include/sys/zfs_ioctl.h
++++ b/include/sys/zfs_ioctl.h
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright 2016 RackTop Systems.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef	_SYS_ZFS_IOCTL_H
+diff --git a/include/sys/zfs_znode.h b/include/sys/zfs_znode.h
+index df08aad..6a2a90a 100644
+--- a/include/sys/zfs_znode.h
++++ b/include/sys/zfs_znode.h
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #ifndef	_SYS_FS_ZFS_ZNODE_H
+diff --git a/include/sys/zil.h b/include/sys/zil.h
+index d3fe6e9..1642da0 100644
+--- a/include/sys/zil.h
++++ b/include/sys/zil.h
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/include/sys/zil_impl.h b/include/sys/zil_impl.h
+index b5c666c..ac908bd 100644
+--- a/include/sys/zil_impl.h
++++ b/include/sys/zil_impl.h
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index 1c57fce..08ff887 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/vdev_queue.c b/module/zfs/vdev_queue.c
+index 084c291..4917cc9 100644
+--- a/module/zfs/vdev_queue.c
++++ b/module/zfs/vdev_queue.c
+@@ -25,6 +25,7 @@
+ 
+ /*
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/vdev_raidz.c b/module/zfs/vdev_raidz.c
+index 085d125..ff06896 100644
+--- a/module/zfs/vdev_raidz.c
++++ b/module/zfs/vdev_raidz.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zfs_context.h>
+diff --git a/module/zfs/zap_micro.c b/module/zfs/zap_micro.c
+index 689c795..f51cc7b 100644
+--- a/module/zfs/zap_micro.c
++++ b/module/zfs/zap_micro.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2014 Spectra Logic Corporation, All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/zio.h>
+diff --git a/module/zfs/zfs_ioctl.c b/module/zfs/zfs_ioctl.c
+index bc04c51..43cedca 100644
+--- a/module/zfs/zfs_ioctl.c
++++ b/module/zfs/zfs_ioctl.c
+@@ -28,6 +28,7 @@
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /*
+diff --git a/module/zfs/zfs_log.c b/module/zfs/zfs_log.c
+index 4fb57e9..99a3917 100644
+--- a/module/zfs/zfs_log.c
++++ b/module/zfs/zfs_log.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2015 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/types.h>
+diff --git a/module/zfs/zfs_vfsops.c b/module/zfs/zfs_vfsops.c
+index 712ac89..ebacf85 100644
+--- a/module/zfs/zfs_vfsops.c
++++ b/module/zfs/zfs_vfsops.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/module/zfs/zfs_vnops.c b/module/zfs/zfs_vnops.c
+index 8f461c5..9f8d4f8 100644
+--- a/module/zfs/zfs_vnops.c
++++ b/module/zfs/zfs_vnops.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2007 Jeremy Teo */
+diff --git a/module/zfs/zfs_znode.c b/module/zfs/zfs_znode.c
+index 440f850..ccc9be2 100644
+--- a/module/zfs/zfs_znode.c
++++ b/module/zfs/zfs_znode.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2007 Jeremy Teo */
+diff --git a/module/zfs/zil.c b/module/zfs/zil.c
+index 38b57e0..e3889b3 100644
+--- a/module/zfs/zil.c
++++ b/module/zfs/zil.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+diff --git a/module/zfs/zio.c b/module/zfs/zio.c
+index 17c94f2..fae3ccb 100644
+--- a/module/zfs/zio.c
++++ b/module/zfs/zio.c
+@@ -22,6 +22,7 @@
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2011 Nexenta Systems, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ #include <sys/sysmacros.h>
+diff --git a/module/zfs/zvol.c b/module/zfs/zvol.c
+index 585500b..95bb26c 100644
+--- a/module/zfs/zvol.c
++++ b/module/zfs/zvol.c
+@@ -26,6 +26,7 @@
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /*
+diff --git a/include/sys/fs/zfs.h b/include/sys/fs/zfs.h
+index bc9f057..6301f25 100644
+--- a/include/sys/fs/zfs.h
++++ b/include/sys/fs/zfs.h
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2011, 2014 by Delphix. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2014 Integros [integros.com]
+  */
+ 
+ /* Portions Copyright 2010 Robert Milkowski */
+-- 
+1.8.3.1
+

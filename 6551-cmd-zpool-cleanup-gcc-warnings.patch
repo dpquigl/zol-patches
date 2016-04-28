@@ -1,0 +1,162 @@
+From b327cd3f3b4dab4f29e7140159b1e01ed2ceef2a Mon Sep 17 00:00:00 2001
+From: Igor Kozhukhov <ikozhukhov@gmail.com>
+Date: Tue, 9 Feb 2016 17:02:43 -0800
+Subject: [PATCH] 6551 cmd/zpool: cleanup gcc warnings Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Reviewed by: Andy Stormont
+ <astormont@racktopsystems.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ cmd/zpool/Makefile     |  5 +----
+ cmd/zpool/zpool_iter.c |  8 +++++---
+ cmd/zpool/zpool_main.c | 32 +++-----------------------------
+ cmd/zpool/zpool_vdev.c |  7 +++++--
+ 4 files changed, 14 insertions(+), 38 deletions(-)
+
+diff --git a/cmd/zpool/Makefile b/cmd/zpool/Makefile
+index 0c0132d..8fd0a0f 100644
+--- a/cmd/zpool/Makefile
++++ b/cmd/zpool/Makefile
+@@ -20,6 +20,7 @@
+ #
+ #
+ # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
++# Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
+ #
+ 
+ PROG= zpool
+@@ -48,10 +49,6 @@ $(NOT_RELEASE_BUILD)CPPFLAGS += -DDEBUG
+ LINTFLAGS += -xerroff=E_NAME_DEF_NOT_USED2 
+ LINTFLAGS64 += -xerroff=E_NAME_DEF_NOT_USED2  
+ 
+-CERRWARN += -_gcc=-Wno-unused-function
+-CERRWARN += -_gcc=-Wno-uninitialized
+-CERRWARN += -_gcc=-Wno-parentheses
+-
+ ROOTUSRSBINLINKS = $(PROG:%=$(ROOTUSRSBIN)/%)
+ 
+ .KEEP_STATE:
+diff --git a/cmd/zpool/zpool_iter.c b/cmd/zpool/zpool_iter.c
+index 2f0daef..6e77f85 100644
+--- a/cmd/zpool/zpool_iter.c
++++ b/cmd/zpool/zpool_iter.c
+@@ -22,8 +22,9 @@
+  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+  */
+-
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
++/*
++ * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
++ */
+ 
+ #include <libintl.h>
+ #include <libuutil.h>
+@@ -131,7 +132,8 @@ pool_list_get(int argc, char **argv, zprop_list_t **proplist, int *err)
+ 		for (i = 0; i < argc; i++) {
+ 			zpool_handle_t *zhp;
+ 
+-			if (zhp = zpool_open_canfail(g_zfs, argv[i])) {
++			if ((zhp = zpool_open_canfail(g_zfs, argv[i])) !=
++			    NULL) {
+ 				if (add_pool(zhp, zlp) != 0)
+ 					*err = B_TRUE;
+ 			} else {
+diff --git a/cmd/zpool/zpool_main.c b/cmd/zpool/zpool_main.c
+index 18af5a2..a2af33b 100644
+--- a/cmd/zpool/zpool_main.c
++++ b/cmd/zpool/zpool_main.c
+@@ -25,6 +25,7 @@
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2012 by Frederik Wessels. All rights reserved.
+  * Copyright (c) 2013 by Prasad Joshi (sTec). All rights reserved.
++ * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
+  */
+ 
+ #include <assert.h>
+@@ -3025,33 +3026,6 @@ zpool_do_list(int argc, char **argv)
+ 	return (ret);
+ }
+ 
+-static nvlist_t *
+-zpool_get_vdev_by_name(nvlist_t *nv, char *name)
+-{
+-	nvlist_t **child;
+-	uint_t c, children;
+-	nvlist_t *match;
+-	char *path;
+-
+-	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
+-	    &child, &children) != 0) {
+-		verify(nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) == 0);
+-		if (strncmp(name, "/dev/dsk/", 9) == 0)
+-			name += 9;
+-		if (strncmp(path, "/dev/dsk/", 9) == 0)
+-			path += 9;
+-		if (strcmp(name, path) == 0)
+-			return (nv);
+-		return (NULL);
+-	}
+-
+-	for (c = 0; c < children; c++)
+-		if ((match = zpool_get_vdev_by_name(child[c], name)) != NULL)
+-			return (match);
+-
+-	return (NULL);
+-}
+-
+ static int
+ zpool_do_attach_or_replace(int argc, char **argv, int replacing)
+ {
+@@ -3782,7 +3756,7 @@ print_scan_status(pool_scan_stat_t *ps)
+ 	 */
+ 	if (ps->pss_state == DSS_FINISHED) {
+ 		uint64_t minutes_taken = (end - start) / 60;
+-		char *fmt;
++		char *fmt = NULL;
+ 
+ 		if (ps->pss_func == POOL_SCAN_SCRUB) {
+ 			fmt = gettext("scrub repaired %s in %lluh%um with "
+@@ -5268,7 +5242,7 @@ find_command_idx(char *command, int *idx)
+ int
+ main(int argc, char **argv)
+ {
+-	int ret;
++	int ret = 0;
+ 	int i;
+ 	char *cmdname;
+ 
+diff --git a/cmd/zpool/zpool_vdev.c b/cmd/zpool/zpool_vdev.c
+index 95a6bd7..7b65e80 100644
+--- a/cmd/zpool/zpool_vdev.c
++++ b/cmd/zpool/zpool_vdev.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
+  */
+ 
+ /*
+@@ -549,7 +550,9 @@ get_replication(nvlist_t *nvroot, boolean_t fatal)
+ 	uint_t c, children;
+ 	nvlist_t *nv;
+ 	char *type;
+-	replication_level_t lastrep, rep, *ret;
++	replication_level_t lastrep = {0};
++	replication_level_t rep;
++	replication_level_t *ret;
+ 	boolean_t dontreport;
+ 
+ 	ret = safe_malloc(sizeof (replication_level_t));
+@@ -1035,7 +1038,7 @@ is_device_in_use(nvlist_t *config, nvlist_t *nv, boolean_t force,
+ 	nvlist_t **child;
+ 	uint_t c, children;
+ 	char *type, *path;
+-	int ret;
++	int ret = 0;
+ 	char buf[MAXPATHLEN];
+ 	uint64_t wholedisk;
+ 	boolean_t anyinuse = B_FALSE;
+-- 
+1.8.3.1
+

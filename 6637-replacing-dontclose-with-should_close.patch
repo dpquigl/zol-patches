@@ -1,0 +1,45 @@
+From d189620258b3c9b0e2f7e2104840be2eee7c68e5 Mon Sep 17 00:00:00 2001
+From: David Schwartz <dschwartz783@gmail.com>
+Date: Tue, 9 Feb 2016 11:07:15 -0800
+Subject: [PATCH] 6637 replacing "dontclose" with "should_close" Reviewed by:
+ Matthew Ahrens <mahrens@delphix.com> Reviewed by: Prakash Surya
+ <prakash.surya@delphix.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ cmd/zfs/zfs_iter.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/cmd/zfs/zfs_iter.c b/cmd/zfs/zfs_iter.c
+index 6455240..3581a47 100644
+--- a/cmd/zfs/zfs_iter.c
++++ b/cmd/zfs/zfs_iter.c
+@@ -91,7 +91,7 @@ static int
+ zfs_callback(zfs_handle_t *zhp, void *data)
+ {
+ 	callback_data_t *cb = data;
+-	boolean_t dontclose = B_FALSE;
++	boolean_t should_close = B_TRUE;
+ 	boolean_t include_snaps = zfs_include_snapshots(zhp, cb);
+ 	boolean_t include_bmarks = (cb->cb_types & ZFS_TYPE_BOOKMARK);
+ 
+@@ -119,7 +119,7 @@ zfs_callback(zfs_handle_t *zhp, void *data)
+ 				}
+ 			}
+ 			uu_avl_insert(cb->cb_avl, node, idx);
+-			dontclose = B_TRUE;
++			should_close = B_FALSE;
+ 		} else {
+ 			free(node);
+ 		}
+@@ -143,7 +143,7 @@ zfs_callback(zfs_handle_t *zhp, void *data)
+ 		cb->cb_depth--;
+ 	}
+ 
+-	if (!dontclose)
++	if (should_close)
+ 		zfs_close(zhp);
+ 
+ 	return (0);
+-- 
+1.8.3.1
+

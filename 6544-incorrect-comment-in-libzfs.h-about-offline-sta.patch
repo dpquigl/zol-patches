@@ -1,0 +1,27 @@
+From cb605c4d8ab24b5a900b8b4ca85db65c22d05fad Mon Sep 17 00:00:00 2001
+From: Gerhard Roethlin <git@the-color-black.net>
+Date: Tue, 5 Jan 2016 20:47:06 -0800
+Subject: [PATCH] 6544 incorrect comment in libzfs.h about offline status
+ Reviewed by: Matthew Ahrens <mahrens@delphix.com> Approved by: Dan McDonald
+ <danmcd@omniti.com>
+
+---
+ include/libzfs.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/libzfs.h b/include/libzfs.h
+index 1ebf520..cbfcc54 100644
+--- a/include/libzfs.h
++++ b/include/libzfs.h
+@@ -322,7 +322,7 @@ typedef enum {
+ 	ZPOOL_STATUS_VERSION_OLDER,	/* older legacy on-disk version */
+ 	ZPOOL_STATUS_FEAT_DISABLED,	/* supported features are disabled */
+ 	ZPOOL_STATUS_RESILVERING,	/* device being resilvered */
+-	ZPOOL_STATUS_OFFLINE_DEV,	/* device online */
++	ZPOOL_STATUS_OFFLINE_DEV,	/* device offline */
+ 	ZPOOL_STATUS_REMOVED_DEV,	/* removed device */
+ 
+ 	/*
+-- 
+1.8.3.1
+

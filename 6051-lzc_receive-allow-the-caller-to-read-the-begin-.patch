@@ -1,0 +1,123 @@
+From 620f322510b2d6433f7f6af60fa52380c07756ad Mon Sep 17 00:00:00 2001
+From: Andriy Gapon <avg@icyb.net.ua>
+Date: Fri, 6 Nov 2015 15:53:28 -0800
+Subject: [PATCH] 6051 lzc_receive: allow the caller to read the begin record
+ Reviewed by: Matthew Ahrens <mahrens@delphix.com> Reviewed by: Paul Dagnelie
+ <pcd@delphix.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ lib/libzfs_core/libzfs_core.c | 42 +++++++++++++++++++++++-----
+ include/libzfs_core.h |  7 ++++-
+ lib/libzfs_core/mapfile-vers  |  1 +
+ 3 files changed, 42 insertions(+), 8 deletions(-)
+
+diff --git a/lib/libzfs_core/libzfs_core.c b/lib/libzfs_core/libzfs_core.c
+index d66f338..1013cf0 100644
+--- a/lib/libzfs_core/libzfs_core.c
++++ b/lib/libzfs_core/libzfs_core.c
+@@ -548,8 +548,9 @@ recv_read(int fd, void *buf, int ilen)
+ }
+ 
+ static int
+-lzc_receive_impl(const char *snapname, nvlist_t *props, const char *origin,
+-    boolean_t force, boolean_t resumable, int fd)
++recv_impl(const char *snapname, nvlist_t *props, const char *origin,
++    boolean_t force, boolean_t resumable, int fd,
++    const dmu_replay_record_t *begin_record)
+ {
+ 	/*
+ 	 * The receive ioctl is still legacy, so we need to construct our own
+@@ -594,9 +595,14 @@ lzc_receive_impl(const char *snapname, nvlist_t *props, const char *origin,
+ 		(void) strlcpy(zc.zc_string, origin, sizeof (zc.zc_string));
+ 
+ 	/* zc_begin_record is non-byteswapped BEGIN record */
+-	error = recv_read(fd, &zc.zc_begin_record, sizeof (zc.zc_begin_record));
+-	if (error != 0)
+-		goto out;
++	if (begin_record == NULL) {
++		error = recv_read(fd, &zc.zc_begin_record,
++		    sizeof (zc.zc_begin_record));
++		if (error != 0)
++			goto out;
++	} else {
++		zc.zc_begin_record = *begin_record;
++	}
+ 
+ 	/* zc_cookie is fd to read from */
+ 	zc.zc_cookie = fd;
+@@ -637,7 +643,7 @@ int
+ lzc_receive(const char *snapname, nvlist_t *props, const char *origin,
+     boolean_t force, int fd)
+ {
+-	return (lzc_receive_impl(snapname, props, origin, force, B_FALSE, fd));
++	return (recv_impl(snapname, props, origin, force, B_FALSE, fd, NULL));
+ }
+ 
+ /*
+@@ -650,7 +656,29 @@ int
+ lzc_receive_resumable(const char *snapname, nvlist_t *props, const char *origin,
+     boolean_t force, int fd)
+ {
+-	return (lzc_receive_impl(snapname, props, origin, force, B_TRUE, fd));
++	return (recv_impl(snapname, props, origin, force, B_TRUE, fd, NULL));
++}
++
++/*
++ * Like lzc_receive, but allows the caller to read the begin record and then to
++ * pass it in.  That could be useful if the caller wants to derive, for example,
++ * the snapname or the origin parameters based on the information contained in
++ * the begin record.
++ * The begin record must be in its original form as read from the stream,
++ * in other words, it should not be byteswapped.
++ *
++ * The 'resumable' parameter allows to obtain the same behavior as with
++ * lzc_receive_resumable.
++ */
++int
++lzc_receive_with_header(const char *snapname, nvlist_t *props,
++    const char *origin, boolean_t force, boolean_t resumable, int fd,
++    const dmu_replay_record_t *begin_record)
++{
++	if (begin_record == NULL)
++		return (EINVAL);
++	return (recv_impl(snapname, props, origin, force, resumable, fd,
++	    begin_record));
+ }
+ 
+ /*
+diff --git a/include/libzfs_core.h b/include/libzfs_core.h
+index 5d3a6fd..d2d7917 100644
+--- a/include/libzfs_core.h
++++ b/include/libzfs_core.h
+@@ -60,10 +60,15 @@ enum lzc_send_flags {
+ int lzc_send(const char *, const char *, int, enum lzc_send_flags);
+ int lzc_send_resume(const char *, const char *, int,
+     enum lzc_send_flags, uint64_t, uint64_t);
++int lzc_send_space(const char *, const char *, uint64_t *);
++
++struct dmu_replay_record;
++
+ int lzc_receive(const char *, nvlist_t *, const char *, boolean_t, int);
+ int lzc_receive_resumable(const char *, nvlist_t *, const char *,
+     boolean_t, int);
+-int lzc_send_space(const char *, const char *, uint64_t *);
++int lzc_receive_with_header(const char *, nvlist_t *, const char *, boolean_t,
++    boolean_t, int, const struct dmu_replay_record *);
+ 
+ boolean_t lzc_exists(const char *);
+ 
+diff --git a/lib/libzfs_core/mapfile-vers b/lib/libzfs_core/mapfile-vers
+index acd4efb..b699fcb 100644
+--- a/lib/libzfs_core/mapfile-vers
++++ b/lib/libzfs_core/mapfile-vers
+@@ -52,6 +52,7 @@ SYMBOL_VERSION ILLUMOS_0.1 {
+ 	lzc_hold;
+ 	lzc_receive;
+ 	lzc_receive_resumable;
++	lzc_receive_with_header;
+ 	lzc_release;
+ 	lzc_rollback;
+ 	lzc_send;
+-- 
+1.8.3.1
+

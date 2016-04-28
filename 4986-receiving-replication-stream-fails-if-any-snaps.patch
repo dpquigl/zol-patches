@@ -1,0 +1,458 @@
+From 5878fad70d76d8711f6608c1f80b0447601261c6 Mon Sep 17 00:00:00 2001
+From: Dan McDonald <danmcd@omniti.com>
+Date: Wed, 25 Nov 2015 10:35:42 -0500
+Subject: [PATCH] 4986 receiving replication stream fails if any snapshot
+ exceeds refquota Reviewed by: John Kennedy <john.kennedy@delphix.com>
+ Reviewed by: Matthew Ahrens <mahrens@delphix.com> Approved by: Gordon Ross
+ <gordon.ross@nexenta.com>
+
+---
+ lib/libzfs/libzfs_sendrecv.c        | 43 ++++++++--
+ usr/src/pkg/manifests/system-test-zfstest.mf       |  3 +
+ usr/src/test/zfs-tests/runfiles/delphix.run        |  2 +-
+ usr/src/test/zfs-tests/runfiles/omnios.run         |  3 +-
+ usr/src/test/zfs-tests/runfiles/openindiana.run    |  3 +-
+ .../tests/functional/cli_root/zfs_receive/Makefile |  3 +-
+ .../cli_root/zfs_receive/zfs_receive_011_pos.ksh   | 84 +++++++++++++++++++
+ module/zfs/zfs_ioctl.c              | 97 +++++++++++++++++++---
+ 8 files changed, 215 insertions(+), 23 deletions(-)
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_011_pos.ksh
+
+diff --git a/lib/libzfs/libzfs_sendrecv.c b/lib/libzfs/libzfs_sendrecv.c
+index b9b0f68..bc91979 100644
+--- a/lib/libzfs/libzfs_sendrecv.c
++++ b/lib/libzfs/libzfs_sendrecv.c
+@@ -24,6 +24,7 @@
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2013 Steven Hartland. All rights reserved.
++ * Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
+  */
+ 
+ #include <assert.h>
+@@ -58,7 +59,7 @@ extern void zfs_setprop_error(libzfs_handle_t *, zfs_prop_t, int, char *);
+ 
+ static int zfs_receive_impl(libzfs_handle_t *, const char *, const char *,
+     recvflags_t *, int, const char *, nvlist_t *, avl_tree_t *, char **, int,
+-    uint64_t *);
++    uint64_t *, const char *);
+ static int guid_to_name(libzfs_handle_t *, const char *,
+     uint64_t, boolean_t, char *);
+ 
+@@ -2561,6 +2562,7 @@ zfs_receive_package(libzfs_handle_t *hdl, int fd, const char *destname,
+ 	nvlist_t *stream_nv = NULL;
+ 	avl_tree_t *stream_avl = NULL;
+ 	char *fromsnap = NULL;
++	char *sendsnap = NULL;
+ 	char *cp;
+ 	char tofs[ZFS_MAXNAMELEN];
+ 	char sendfs[ZFS_MAXNAMELEN];
+@@ -2709,8 +2711,16 @@ zfs_receive_package(libzfs_handle_t *hdl, int fd, const char *destname,
+ 	 */
+ 	(void) strlcpy(sendfs, drr->drr_u.drr_begin.drr_toname,
+ 	    ZFS_MAXNAMELEN);
+-	if ((cp = strchr(sendfs, '@')) != NULL)
++	if ((cp = strchr(sendfs, '@')) != NULL) {
+ 		*cp = '\0';
++		/*
++		 * Find the "sendsnap", the final snapshot in a replication
++		 * stream.  zfs_receive_one() handles certain errors
++		 * differently, depending on if the contained stream is the
++		 * last one or not.
++		 */
++		sendsnap = (cp + 1);
++	}
+ 
+ 	/* Finally, receive each contained stream */
+ 	do {
+@@ -2723,7 +2733,7 @@ zfs_receive_package(libzfs_handle_t *hdl, int fd, const char *destname,
+ 		 */
+ 		error = zfs_receive_impl(hdl, destname, NULL, flags, fd,
+ 		    sendfs, stream_nv, stream_avl, top_zfs, cleanup_fd,
+-		    action_handlep);
++		    action_handlep, sendsnap);
+ 		if (error == ENODATA) {
+ 			error = 0;
+ 			break;
+@@ -2889,7 +2899,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
+     const char *originsnap, recvflags_t *flags, dmu_replay_record_t *drr,
+     dmu_replay_record_t *drr_noswap, const char *sendfs, nvlist_t *stream_nv,
+     avl_tree_t *stream_avl, char **top_zfs, int cleanup_fd,
+-    uint64_t *action_handlep)
++    uint64_t *action_handlep, const char *finalsnap)
+ {
+ 	zfs_cmd_t zc = { 0 };
+ 	time_t begin_time;
+@@ -2906,6 +2916,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
+ 	nvlist_t *snapprops_nvlist = NULL;
+ 	zprop_errflags_t prop_errflags;
+ 	boolean_t recursive;
++	char *snapname = NULL;
+ 
+ 	begin_time = time(NULL);
+ 
+@@ -2916,7 +2927,6 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
+ 	    ENOENT);
+ 
+ 	if (stream_avl != NULL) {
+-		char *snapname;
+ 		nvlist_t *fs = fsavl_find(stream_avl, drrb->drr_toguid,
+ 		    &snapname);
+ 		nvlist_t *props;
+@@ -3263,7 +3273,21 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
+ 			    ZPROP_N_MORE_ERRORS) == 0) {
+ 				trunc_prop_errs(intval);
+ 				break;
+-			} else {
++			} else if (snapname == NULL || finalsnap == NULL ||
++			    strcmp(finalsnap, snapname) == 0 ||
++			    strcmp(nvpair_name(prop_err),
++			    zfs_prop_to_name(ZFS_PROP_REFQUOTA)) != 0) {
++				/*
++				 * Skip the special case of, for example,
++				 * "refquota", errors on intermediate
++				 * snapshots leading up to a final one.
++				 * That's why we have all of the checks above.
++				 *
++				 * See zfs_ioctl.c's extract_delay_props() for
++				 * a list of props which can fail on
++				 * intermediate snapshots, but shouldn't
++				 * affect the overall receive.
++				 */
+ 				(void) snprintf(tbuf, sizeof (tbuf),
+ 				    dgettext(TEXT_DOMAIN,
+ 				    "cannot receive %s property on %s"),
+@@ -3448,7 +3472,7 @@ static int
+ zfs_receive_impl(libzfs_handle_t *hdl, const char *tosnap,
+     const char *originsnap, recvflags_t *flags, int infd, const char *sendfs,
+     nvlist_t *stream_nv, avl_tree_t *stream_avl, char **top_zfs, int cleanup_fd,
+-    uint64_t *action_handlep)
++    uint64_t *action_handlep, const char *finalsnap)
+ {
+ 	int err;
+ 	dmu_replay_record_t drr, drr_noswap;
+@@ -3544,10 +3568,11 @@ zfs_receive_impl(libzfs_handle_t *hdl, const char *tosnap,
+ 			if ((cp = strchr(nonpackage_sendfs, '@')) != NULL)
+ 				*cp = '\0';
+ 			sendfs = nonpackage_sendfs;
++			VERIFY(finalsnap == NULL);
+ 		}
+ 		return (zfs_receive_one(hdl, infd, tosnap, originsnap, flags,
+ 		    &drr, &drr_noswap, sendfs, stream_nv, stream_avl, top_zfs,
+-		    cleanup_fd, action_handlep));
++		    cleanup_fd, action_handlep, finalsnap));
+ 	} else {
+ 		assert(DMU_GET_STREAM_HDRTYPE(drrb->drr_versioninfo) ==
+ 		    DMU_COMPOUNDSTREAM);
+@@ -3582,7 +3607,7 @@ zfs_receive(libzfs_handle_t *hdl, const char *tosnap, nvlist_t *props,
+ 	VERIFY(cleanup_fd >= 0);
+ 
+ 	err = zfs_receive_impl(hdl, tosnap, originsnap, flags, infd, NULL, NULL,
+-	    stream_avl, &top_zfs, cleanup_fd, &action_handle);
++	    stream_avl, &top_zfs, cleanup_fd, &action_handle, NULL);
+ 
+ 	VERIFY(0 == close(cleanup_fd));
+ 
+diff --git a/usr/src/pkg/manifests/system-test-zfstest.mf b/usr/src/pkg/manifests/system-test-zfstest.mf
+index 70e5ff6..61fe6c6 100644
+--- a/usr/src/pkg/manifests/system-test-zfstest.mf
++++ b/usr/src/pkg/manifests/system-test-zfstest.mf
+@@ -665,6 +665,9 @@ file \
+ file \
+     path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_010_pos \
+     mode=0555
++file \
++    path=opt/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_011_pos \
++    mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs_rename/cleanup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs_rename/setup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs_rename/zfs_rename.cfg \
+diff --git a/usr/src/test/zfs-tests/runfiles/delphix.run b/usr/src/test/zfs-tests/runfiles/delphix.run
+index 266247b..475a429 100644
+--- a/usr/src/test/zfs-tests/runfiles/delphix.run
++++ b/usr/src/test/zfs-tests/runfiles/delphix.run
+@@ -140,7 +140,7 @@ tests = ['zfs_written_property_001_pos']
+ tests = ['zfs_receive_001_pos', 'zfs_receive_002_pos', 'zfs_receive_003_pos',
+     'zfs_receive_005_neg', 'zfs_receive_006_pos',
+     'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg',
+-    'zfs_receive_010_pos']
++    'zfs_receive_010_pos', 'zfs_receive_011_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_rename]
+ tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos', 'zfs_rename_003_pos',
+diff --git a/usr/src/test/zfs-tests/runfiles/omnios.run b/usr/src/test/zfs-tests/runfiles/omnios.run
+index cafd94b..5b030f3 100644
+--- a/usr/src/test/zfs-tests/runfiles/omnios.run
++++ b/usr/src/test/zfs-tests/runfiles/omnios.run
+@@ -139,7 +139,8 @@ tests = ['zfs_written_property_001_pos']
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_receive]
+ tests = ['zfs_receive_001_pos', 'zfs_receive_002_pos', 'zfs_receive_003_pos',
+     'zfs_receive_005_neg', 'zfs_receive_006_pos',
+-    'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg']
++    'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg',
++    'zfs_receive_010_pos', 'zfs_receive_011_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_rename]
+ tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos', 'zfs_rename_003_pos',
+diff --git a/usr/src/test/zfs-tests/runfiles/openindiana.run b/usr/src/test/zfs-tests/runfiles/openindiana.run
+index 0bac84c..475a429 100644
+--- a/usr/src/test/zfs-tests/runfiles/openindiana.run
++++ b/usr/src/test/zfs-tests/runfiles/openindiana.run
+@@ -139,7 +139,8 @@ tests = ['zfs_written_property_001_pos']
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_receive]
+ tests = ['zfs_receive_001_pos', 'zfs_receive_002_pos', 'zfs_receive_003_pos',
+     'zfs_receive_005_neg', 'zfs_receive_006_pos',
+-    'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg']
++    'zfs_receive_007_neg', 'zfs_receive_008_pos', 'zfs_receive_009_neg',
++    'zfs_receive_010_pos', 'zfs_receive_011_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zfs_rename]
+ tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos', 'zfs_rename_003_pos',
+diff --git a/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile
+index f203bfc..687371b 100644
+--- a/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile
++++ b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/Makefile
+@@ -29,7 +29,8 @@ PROGS = cleanup \
+ 	zfs_receive_007_neg \
+ 	zfs_receive_008_pos \
+ 	zfs_receive_009_neg \
+-	zfs_receive_010_pos
++	zfs_receive_010_pos \
++	zfs_receive_011_pos
+ 
+ CMDS = $(PROGS:%=$(TESTDIR)/%)
+ $(CMDS) := FILEMODE = 0555
+diff --git a/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_011_pos.ksh b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_011_pos.ksh
+new file mode 100644
+index 0000000..b905a87
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/cli_root/zfs_receive/zfs_receive_011_pos.ksh
+@@ -0,0 +1,84 @@
++#!/bin/ksh -p
++#
++# CDDL HEADER START
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# DESCRIPTION:
++#	refquota should be sent-and-received, but it should not interfere with
++#	the receipt of intermediate snapshots that may have preceded the
++#	final snapshot, where the refquota should hold.
++#
++# STRATEGY:
++#	1. Create a filesystem.
++#	2. Create two equal-sized large files.
++#	3. Snapshot the filesystem.
++#	4. Remove one of the two large files.
++#	5. Create a refquota larger than one file, but smaller than both.
++#	6. Snapshot the filesystem again.
++#	7. Send a replication stream of the second snapshot to a new filesystem.
++#
++#
++
++verify_runnable "both"
++
++typeset streamfile=/var/tmp/streamfile.$$
++
++function cleanup
++{
++	log_must $RM $streamfile
++	log_must $ZFS destroy -rf $TESTPOOL/$TESTFS1
++	log_must $ZFS destroy -rf $TESTPOOL/$TESTFS2
++}
++
++log_assert "refquota is properly sent-and-received, regardless of any " \
++	"intermediate snapshots sent by a replication stream."
++log_onexit cleanup
++
++orig=$TESTPOOL/$TESTFS1
++dest=$TESTPOOL/$TESTFS2
++#	1. Create a filesystem.
++log_must $ZFS create $orig
++origdir=$(get_prop mountpoint $orig)
++
++#	2. Create two equal-sized large files.
++log_must $MKFILE 5M $origdir/file1
++log_must $MKFILE 5M $origdir/file2
++log_must $SYNC
++
++#	3. Snapshot the filesystem.
++log_must $ZFS snapshot $orig@1
++
++#	4. Remove one of the two large files.
++log_must $RM $origdir/file2
++log_must $SYNC
++
++#	5. Create a refquota larger than one file, but smaller than both.
++log_must $ZFS set refquota=8M $orig
++
++#	6. Snapshot the filesystem again.
++log_must $ZFS snapshot $orig@2
++
++#	7. Send a replication stream of the second snapshot to a new filesystem.
++log_must eval "$ZFS send -R $orig@2 > $streamfile"
++log_must eval "$ZFS recv $dest < $streamfile"
++
++log_pass "refquota is properly sent-and-received, regardless of any " \
++	"intermediate snapshots sent by a replication stream."
+diff --git a/module/zfs/zfs_ioctl.c b/module/zfs/zfs_ioctl.c
+index 933802f..bc04c51 100644
+--- a/module/zfs/zfs_ioctl.c
++++ b/module/zfs/zfs_ioctl.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Portions Copyright 2011 Martin Matuska
++ * Copyright 2015, OmniTI Computer Consulting, Inc. All rights reserved.
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014, Joyent, Inc. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+@@ -4090,6 +4091,56 @@ next:
+ 	}
+ }
+ 
++/*
++ * Extract properties that cannot be set PRIOR to the receipt of a dataset.
++ * For example, refquota cannot be set until after the receipt of a dataset,
++ * because in replication streams, an older/earlier snapshot may exceed the
++ * refquota.  We want to receive the older/earlier snapshot, but setting
++ * refquota pre-receipt will set the dsl's ACTUAL quota, which will prevent
++ * the older/earlier snapshot from being received (with EDQUOT).
++ *
++ * The ZFS test "zfs_receive_011_pos" demonstrates such a scenario.
++ *
++ * libzfs will need to be judicious handling errors encountered by props
++ * extracted by this function.
++ */
++static nvlist_t *
++extract_delay_props(nvlist_t *props)
++{
++	nvlist_t *delayprops;
++	nvpair_t *nvp, *tmp;
++	static const zfs_prop_t delayable[] = { ZFS_PROP_REFQUOTA, 0 };
++	int i;
++
++	VERIFY(nvlist_alloc(&delayprops, NV_UNIQUE_NAME, KM_SLEEP) == 0);
++
++	for (nvp = nvlist_next_nvpair(props, NULL); nvp != NULL;
++	    nvp = nvlist_next_nvpair(props, nvp)) {
++		/*
++		 * strcmp() is safe because zfs_prop_to_name() always returns
++		 * a bounded string.
++		 */
++		for (i = 0; delayable[i] != 0; i++) {
++			if (strcmp(zfs_prop_to_name(delayable[i]),
++			    nvpair_name(nvp)) == 0) {
++				break;
++			}
++		}
++		if (delayable[i] != 0) {
++			tmp = nvlist_prev_nvpair(props, nvp);
++			VERIFY(nvlist_add_nvpair(delayprops, nvp) == 0);
++			VERIFY(nvlist_remove_nvpair(props, nvp) == 0);
++			nvp = tmp;
++		}
++	}
++
++	if (nvlist_empty(delayprops)) {
++		nvlist_free(delayprops);
++		delayprops = NULL;
++	}
++	return (delayprops);
++}
++
+ #ifdef	DEBUG
+ static boolean_t zfs_ioc_recv_inject_err;
+ #endif
+@@ -4126,6 +4177,7 @@ zfs_ioc_recv(zfs_cmd_t *zc)
+ 	offset_t off;
+ 	nvlist_t *props = NULL; /* sent properties */
+ 	nvlist_t *origprops = NULL; /* existing properties */
++	nvlist_t *delayprops = NULL; /* sent properties applied post-receive */
+ 	char *origin = NULL;
+ 	char *tosnap;
+ 	char tofs[ZFS_MAXNAMELEN];
+@@ -4206,21 +4258,12 @@ zfs_ioc_recv(zfs_cmd_t *zc)
+ 		props_error = dsl_prop_set_hasrecvd(tofs);
+ 
+ 		if (props_error == 0) {
++			delayprops = extract_delay_props(props);
+ 			(void) zfs_set_prop_nvlist(tofs, ZPROP_SRC_RECEIVED,
+ 			    props, errors);
+ 		}
+ 	}
+ 
+-	if (zc->zc_nvlist_dst_size != 0 &&
+-	    (nvlist_smush(errors, zc->zc_nvlist_dst_size) != 0 ||
+-	    put_nvlist(zc, errors) != 0)) {
+-		/*
+-		 * Caller made zc->zc_nvlist_dst less than the minimum expected
+-		 * size or supplied an invalid address.
+-		 */
+-		props_error = SET_ERROR(EINVAL);
+-	}
+-
+ 	off = fp->f_offset;
+ 	error = dmu_recv_stream(&drc, fp->f_vnode, &off, zc->zc_cleanup_fd,
+ 	    &zc->zc_action_handle);
+@@ -4245,6 +4288,40 @@ zfs_ioc_recv(zfs_cmd_t *zc)
+ 		} else {
+ 			error = dmu_recv_end(&drc, NULL);
+ 		}
++
++		/* Set delayed properties now, after we're done receiving. */
++		if (delayprops != NULL && error == 0) {
++			(void) zfs_set_prop_nvlist(tofs, ZPROP_SRC_RECEIVED,
++			    delayprops, errors);
++		}
++	}
++
++	if (delayprops != NULL) {
++		/*
++		 * Merge delayed props back in with initial props, in case
++		 * we're DEBUG and zfs_ioc_recv_inject_err is set (which means
++		 * we have to make sure clear_received_props() includes
++		 * the delayed properties).
++		 *
++		 * Since zfs_ioc_recv_inject_err is only in DEBUG kernels,
++		 * using ASSERT() will be just like a VERIFY.
++		 */
++		ASSERT(nvlist_merge(props, delayprops, 0) == 0);
++		nvlist_free(delayprops);
++	}
++
++	/*
++	 * Now that all props, initial and delayed, are set, report the prop
++	 * errors to the caller.
++	 */
++	if (zc->zc_nvlist_dst_size != 0 &&
++	    (nvlist_smush(errors, zc->zc_nvlist_dst_size) != 0 ||
++	    put_nvlist(zc, errors) != 0)) {
++		/*
++		 * Caller made zc->zc_nvlist_dst less than the minimum expected
++		 * size or supplied an invalid address.
++		 */
++		props_error = SET_ERROR(EINVAL);
+ 	}
+ 
+ 	zc->zc_cookie = off - fp->f_offset;
+-- 
+1.8.3.1
+
