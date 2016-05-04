@@ -1,0 +1,43 @@
+From 4cde22c29999ffb907ca39d2ebd512812f7e5168 Mon Sep 17 00:00:00 2001
+From: Chris Williamson <chris.williamson@delphix.com>
+Date: Tue, 19 Apr 2016 20:45:17 -0700
+Subject: [PATCH] 6873 zfs_destroy_snaps_nvl leaks errlist Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Reviewed by: Paul Dagnelie <pcd@delphix.com>
+ Approved by: Dan McDonald <danmcd@omniti.com>
+
+---
+ lib/libzfs/libzfs_dataset.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/lib/libzfs/libzfs_dataset.c b/lib/libzfs/libzfs_dataset.c
+index 4eb953b..3585105 100644
+--- a/lib/libzfs/libzfs_dataset.c
++++ b/lib/libzfs/libzfs_dataset.c
+@@ -3403,12 +3403,14 @@ int
+ zfs_destroy_snaps_nvl(libzfs_handle_t *hdl, nvlist_t *snaps, boolean_t defer)
+ {
+ 	int ret;
+-	nvlist_t *errlist;
++	nvlist_t *errlist = NULL;
+ 
+ 	ret = lzc_destroy_snaps(snaps, defer, &errlist);
+ 
+-	if (ret == 0)
++	if (ret == 0) {
++		nvlist_free(errlist);
+ 		return (0);
++	}
+ 
+ 	if (nvlist_empty(errlist)) {
+ 		char errbuf[1024];
+@@ -3436,6 +3438,7 @@ zfs_destroy_snaps_nvl(libzfs_handle_t *hdl, nvlist_t *snaps, boolean_t defer)
+ 		}
+ 	}
+ 
++	nvlist_free(errlist);
+ 	return (ret);
+ }
+ 
+-- 
+1.8.3.1
+

@@ -1,0 +1,322 @@
+From f83b46baf98d276f5f84fa84c8b461f412ac1f5e Mon Sep 17 00:00:00 2001
+From: Paul Dagnelie <pcd@delphix.com>
+Date: Tue, 19 Apr 2016 16:36:10 -0700
+Subject: [PATCH] 6872 zfs libraries should not allow uninitialized variables
+ Reviewed by: Dan Kimmel <dan.kimmel@delphix.com> Reviewed by: George Wilson
+ <george.wilson@delphix.com> Reviewed by: Prakash Surya
+ <prakash.surya@delphix.com> Reviewed by: Yuri Pankov
+ <yuri.pankov@nexenta.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ cmd/zfs/Makefile                           |  6 +++---
+ cmd/zpool/Makefile                         |  5 +++--
+ cmd/zpool/zpool_vdev.c                     |  3 +--
+ usr/src/lib/libzfs/Makefile.com                    |  3 +--
+ lib/libzfs/libzfs_dataset.c         |  7 ++++---
+ lib/libzfs/libzfs_import.c          |  6 +++---
+ lib/libzfs/libzfs_util.c            |  2 +-
+ usr/src/lib/libzfs_jni/Makefile.com                |  5 ++++-
+ usr/src/lib/libzfs_jni/common/libzfs_jni_diskmgt.c | 24 +++++++++++++---------
+ lib/libzpool/Makefile.com                  |  3 +--
+ 10 files changed, 35 insertions(+), 29 deletions(-)
+
+diff --git a/cmd/zfs/Makefile b/cmd/zfs/Makefile
+index 4e42046..f84bcbb 100644
+--- a/cmd/zfs/Makefile
++++ b/cmd/zfs/Makefile
+@@ -22,7 +22,7 @@
+ # Use is subject to license terms.
+ #
+ # Copyright 2010 Nexenta Systems, Inc. All rights reserved.
+-# Copyright (c) 2012 by Delphix. All rights reserved.
++# Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ # Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
+ #
+ 
+@@ -51,8 +51,8 @@ CPPFLAGS += -D_LARGEFILE64_SOURCE=1 -D_REENTRANT $(INCS)
+ $(NOT_RELEASE_BUILD)CPPFLAGS += -DDEBUG
+ 
+ # lint complains about unused _umem_* functions
+-LINTFLAGS += -xerroff=E_NAME_DEF_NOT_USED2 
+-LINTFLAGS64 += -xerroff=E_NAME_DEF_NOT_USED2 
++LINTFLAGS += -xerroff=E_NAME_DEF_NOT_USED2
++LINTFLAGS64 += -xerroff=E_NAME_DEF_NOT_USED2
+ 
+ ROOTUSRSBINLINKS = $(PROG:%=$(ROOTUSRSBIN)/%)
+ USRLIBFSTYPELINKS = $(LINKPROGS:%=$(USRLIBFSTYPE)/%)
+diff --git a/cmd/zpool/Makefile b/cmd/zpool/Makefile
+index 8fd0a0f..cefbefe 100644
+--- a/cmd/zpool/Makefile
++++ b/cmd/zpool/Makefile
+@@ -21,6 +21,7 @@
+ #
+ # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ # Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
++# Copyright (c) 2015 by Delphix. All rights reserved.
+ #
+ 
+ PROG= zpool
+@@ -46,8 +47,8 @@ CPPFLAGS += -D_LARGEFILE64_SOURCE=1 -D_REENTRANT $(INCS)
+ $(NOT_RELEASE_BUILD)CPPFLAGS += -DDEBUG
+ 
+ # lint complains about unused _umem_* functions
+-LINTFLAGS += -xerroff=E_NAME_DEF_NOT_USED2 
+-LINTFLAGS64 += -xerroff=E_NAME_DEF_NOT_USED2  
++LINTFLAGS += -xerroff=E_NAME_DEF_NOT_USED2
++LINTFLAGS64 += -xerroff=E_NAME_DEF_NOT_USED2
+ 
+ ROOTUSRSBINLINKS = $(PROG:%=$(ROOTUSRSBIN)/%)
+ 
+diff --git a/cmd/zpool/zpool_vdev.c b/cmd/zpool/zpool_vdev.c
+index 3de8a9e..e60d7c0 100644
+--- a/cmd/zpool/zpool_vdev.c
++++ b/cmd/zpool/zpool_vdev.c
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
+  */
+ 
+@@ -558,7 +558,6 @@ get_replication(nvlist_t *nvroot, boolean_t fatal)
+ 	verify(nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN,
+ 	    &top, &toplevels) == 0);
+ 
+-	lastrep.zprl_type = NULL;
+ 	for (t = 0; t < toplevels; t++) {
+ 		uint64_t is_log = B_FALSE;
+ 
+diff --git a/usr/src/lib/libzfs/Makefile.com b/usr/src/lib/libzfs/Makefile.com
+index c9632da..e07700a 100644
+--- a/usr/src/lib/libzfs/Makefile.com
++++ b/usr/src/lib/libzfs/Makefile.com
+@@ -20,7 +20,7 @@
+ #
+ #
+ # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+-# Copyright (c) 2011, 2014 by Delphix. All rights reserved.
++# Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+ #
+ 
+ LIBRARY= libzfs.a
+@@ -77,7 +77,6 @@ $(DYNLIB) := LDLIBS +=	-lz
+ 
+ CERRWARN +=	-_gcc=-Wno-switch
+ CERRWARN +=	-_gcc=-Wno-parentheses
+-CERRWARN +=	-_gcc=-Wno-uninitialized
+ CERRWARN +=	-_gcc=-Wno-unused-function
+ 
+ SRCS=	$(OBJS_COMMON:%.o=$(SRCDIR)/%.c)	\
+diff --git a/lib/libzfs/libzfs_dataset.c b/lib/libzfs/libzfs_dataset.c
+index 71a2226..e72d0e8 100644
+--- a/lib/libzfs/libzfs_dataset.c
++++ b/lib/libzfs/libzfs_dataset.c
+@@ -1546,7 +1546,7 @@ zfs_prop_set_list(zfs_handle_t *zhp, nvlist_t *props)
+ 	libzfs_handle_t *hdl = zhp->zfs_hdl;
+ 	nvlist_t *nvl;
+ 	int nvl_len;
+-	int added_resv;
++	int added_resv = 0;
+ 
+ 	(void) snprintf(errbuf, sizeof (errbuf),
+ 	    dgettext(TEXT_DOMAIN, "cannot set property for '%s'"),
+@@ -3140,7 +3140,7 @@ zfs_create_ancestors(libzfs_handle_t *hdl, const char *path)
+ {
+ 	int prefix;
+ 	char *path_copy;
+-	int rc;
++	int rc = 0;
+ 
+ 	if (check_parents(hdl, path, NULL, B_TRUE, &prefix) != 0)
+ 		return (-1);
+@@ -3779,7 +3779,7 @@ zfs_rollback(zfs_handle_t *zhp, zfs_handle_t *snap, boolean_t force)
+ 	rollback_data_t cb = { 0 };
+ 	int err;
+ 	boolean_t restore_resv = 0;
+-	uint64_t old_volsize, new_volsize;
++	uint64_t old_volsize = 0, new_volsize;
+ 	zfs_prop_t resv_prop;
+ 
+ 	assert(zhp->zfs_type == ZFS_TYPE_FILESYSTEM ||
+@@ -3968,6 +3968,7 @@ zfs_rename(zfs_handle_t *zhp, const char *target, boolean_t recursive,
+ 			    "child dataset with inherited mountpoint is used "
+ 			    "in a non-global zone"));
+ 			(void) zfs_error(hdl, EZFS_ZONED, errbuf);
++			ret = -1;
+ 			goto error;
+ 		}
+ 
+diff --git a/lib/libzfs/libzfs_import.c b/lib/libzfs/libzfs_import.c
+index 16c2681..b73a71e 100644
+--- a/lib/libzfs/libzfs_import.c
++++ b/lib/libzfs/libzfs_import.c
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013 by Delphix. All rights reserved.
++ * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright 2015 RackTop Systems.
+  * Copyright 2016 Nexenta Systems, Inc.
+  */
+@@ -438,12 +438,12 @@ get_configs(libzfs_handle_t *hdl, pool_list_t *pl, boolean_t active_ok)
+ 	pool_entry_t *pe;
+ 	vdev_entry_t *ve;
+ 	config_entry_t *ce;
+-	nvlist_t *ret = NULL, *config = NULL, *tmp, *nvtop, *nvroot;
++	nvlist_t *ret = NULL, *config = NULL, *tmp = NULL, *nvtop, *nvroot;
+ 	nvlist_t **spares, **l2cache;
+ 	uint_t i, nspares, nl2cache;
+ 	boolean_t config_seen;
+ 	uint64_t best_txg;
+-	char *name, *hostname;
++	char *name, *hostname = NULL;
+ 	uint64_t guid;
+ 	uint_t children = 0;
+ 	nvlist_t **child = NULL;
+diff --git a/lib/libzfs/libzfs_util.c b/lib/libzfs/libzfs_util.c
+index 043816d..0096679 100644
+--- a/lib/libzfs/libzfs_util.c
++++ b/lib/libzfs/libzfs_util.c
+@@ -967,7 +967,7 @@ zprop_print_one_property(const char *name, zprop_get_cbdata_t *cbp,
+     const char *source, const char *recvd_value)
+ {
+ 	int i;
+-	const char *str;
++	const char *str = NULL;
+ 	char buf[128];
+ 
+ 	/*
+diff --git a/usr/src/lib/libzfs_jni/Makefile.com b/usr/src/lib/libzfs_jni/Makefile.com
+index e9781ef..8d8f9c4 100644
+--- a/usr/src/lib/libzfs_jni/Makefile.com
++++ b/usr/src/lib/libzfs_jni/Makefile.com
+@@ -23,6 +23,10 @@
+ # Use is subject to license terms.
+ #
+ 
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
+ LIBRARY= libzfs_jni.a
+ VERS= .1
+ 
+@@ -45,7 +49,6 @@ LDLIBS +=	-lc -lnvpair -ldiskmgt -lzfs
+ CPPFLAGS +=	$(INCS)
+ $(NOT_RELEASE_BUILD) CPPFLAGS += -DDEBUG
+ CERRWARN +=	-_gcc=-Wno-switch
+-CERRWARN +=	-_gcc=-Wno-uninitialized
+ 
+ SRCDIR =	../common
+ $(LINTLIB) := SRCS=	$(SRCDIR)/$(LINTSRC)
+diff --git a/usr/src/lib/libzfs_jni/common/libzfs_jni_diskmgt.c b/usr/src/lib/libzfs_jni/common/libzfs_jni_diskmgt.c
+index d1c53ff..cb0a01c 100644
+--- a/usr/src/lib/libzfs_jni/common/libzfs_jni_diskmgt.c
++++ b/usr/src/lib/libzfs_jni/common/libzfs_jni_diskmgt.c
+@@ -24,7 +24,9 @@
+  * Use is subject to license terms.
+  */
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
++/*
++ * Copyright (c) 2015 by Delphix. All rights reserved.
++ */
+ 
+ #include "libzfs_jni_diskmgt.h"
+ #include "libzfs_jni_util.h"
+@@ -68,7 +70,7 @@ static void (*error_func)(const char *, va_list);
+ static char *
+ get_device_name(dm_descriptor_t device, int *error)
+ {
+-	char *dup;
++	char *dup = NULL;
+ 	char *name;
+ 
+ 	*error = 0;
+@@ -120,7 +122,7 @@ get_disk(dm_descriptor_t disk, int *error)
+ 				/* Get media */
+ 				dm_descriptor_t *media =
+ 				    dm_get_associated_descriptors(disk,
+-					DM_MEDIA, error);
++				    DM_MEDIA, error);
+ 				if (*error != 0 || media == NULL ||
+ 				    *media == NULL) {
+ 					handle_error(
+@@ -136,9 +138,9 @@ get_disk(dm_descriptor_t disk, int *error)
+ 						/* Get free slices */
+ 						dp->slices =
+ 						    get_disk_usable_slices(
+-							media[0], dp->name,
+-							dp->blocksize,
+-							&(dp->in_use), error);
++						    media[0], dp->name,
++						    dp->blocksize,
++						    &(dp->in_use), error);
+ 					}
+ 					dm_free_descriptors(media);
+ 				}
+@@ -175,7 +177,8 @@ get_disk_aliases(dm_descriptor_t disk, char *name, int *error)
+ 		int j;
+ 
+ 		/* Count aliases */
+-		for (j = 0; aliases[j] != NULL; j++);
++		for (j = 0; aliases[j] != NULL; j++)
++			;
+ 
+ 		names = (char **)calloc(j + 1, sizeof (char *));
+ 		if (names == NULL) {
+@@ -369,7 +372,8 @@ get_disk_usable_slices(dm_descriptor_t media, const char *name,
+ 	if (slices != NULL) {
+ 		int i, nslices;
+ 
+-		for (nslices = 0; slices[nslices] != NULL; nslices++);
++		for (nslices = 0; slices[nslices] != NULL; nslices++)
++			;
+ 
+ 		/* Prune slices based on use */
+ 		for (i = nslices - 1; i >= 0; i--) {
+@@ -386,7 +390,7 @@ get_disk_usable_slices(dm_descriptor_t media, const char *name,
+ 
+ 			s_in_use = slice_in_use(slice, error);
+ 			if (*error) {
+-			    break;
++				break;
+ 			}
+ 
+ 			if (s_in_use) {
+@@ -627,7 +631,7 @@ slice_too_small(dmgt_slice_t *slice)
+ 	if (slice->size < SPA_MINDEVSIZE) {
+ #ifdef DEBUG
+ 		(void) fprintf(stderr, "can't use %s: slice too small: %llu\n",
+-			slice->name, (unsigned long long)slice->size);
++		    slice->name, (unsigned long long)slice->size);
+ #endif
+ 		return (1);
+ 	}
+diff --git a/lib/libzpool/Makefile.com b/lib/libzpool/Makefile.com
+index da5da5d..b016ffa 100644
+--- a/lib/libzpool/Makefile.com
++++ b/lib/libzpool/Makefile.com
+@@ -20,7 +20,7 @@
+ #
+ #
+ # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+-# Copyright (c) 2013 by Delphix. All rights reserved.
++# Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+ #
+ 
+ LIBRARY= libzpool.a
+@@ -71,7 +71,6 @@ CERRWARN +=	-_gcc=-Wno-parentheses
+ CERRWARN +=	-_gcc=-Wno-switch
+ CERRWARN +=	-_gcc=-Wno-type-limits
+ CERRWARN +=	-_gcc=-Wno-unused-variable
+-CERRWARN +=	-_gcc=-Wno-uninitialized
+ CERRWARN +=	-_gcc=-Wno-empty-body
+ CERRWARN +=	-_gcc=-Wno-unused-function
+ CERRWARN +=	-_gcc=-Wno-unused-label
+-- 
+1.8.3.1
+

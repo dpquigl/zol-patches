@@ -1,0 +1,105 @@
+From 26455f9efcf9b1e44937d4d86d1ce37b006f25a9 Mon Sep 17 00:00:00 2001
+From: Andriy Gapon <andriy.gapon@clusterhq.com>
+Date: Fri, 9 Oct 2015 12:02:05 +0300
+Subject: [PATCH] 6052 decouple lzc_create() from the implementation details
+ Reviewed by: Matthew Ahrens <mahrens@delphix.com> Approved by: Richard Lowe
+ <richlowe@richlowe.net>
+
+---
+ lib/libzfs/libzfs_dataset.c   |  6 +++---
+ lib/libzfs_core/libzfs_core.c |  4 ++--
+ include/libzfs_core.h | 11 +++++++++--
+ include/sys/fs/zfs.h              |  4 ++++
+ 4 files changed, 18 insertions(+), 7 deletions(-)
+
+diff --git a/lib/libzfs/libzfs_dataset.c b/lib/libzfs/libzfs_dataset.c
+index e72d0e8..4eb953b 100644
+--- a/lib/libzfs/libzfs_dataset.c
++++ b/lib/libzfs/libzfs_dataset.c
+@@ -3167,7 +3167,7 @@ zfs_create(libzfs_handle_t *hdl, const char *path, zfs_type_t type,
+ 	uint64_t blocksize = zfs_prop_default_numeric(ZFS_PROP_VOLBLOCKSIZE);
+ 	char errbuf[1024];
+ 	uint64_t zoned;
+-	dmu_objset_type_t ost;
++	enum lzc_dataset_type ost;
+ 
+ 	(void) snprintf(errbuf, sizeof (errbuf), dgettext(TEXT_DOMAIN,
+ 	    "cannot create '%s'"), path);
+@@ -3194,9 +3194,9 @@ zfs_create(libzfs_handle_t *hdl, const char *path, zfs_type_t type,
+ 	}
+ 
+ 	if (type == ZFS_TYPE_VOLUME)
+-		ost = DMU_OST_ZVOL;
++		ost = LZC_DATSET_TYPE_ZVOL;
+ 	else
+-		ost = DMU_OST_ZFS;
++		ost = LZC_DATSET_TYPE_ZFS;
+ 
+ 	/* open zpool handle for prop validation */
+ 	char pool_path[MAXNAMELEN];
+diff --git a/lib/libzfs_core/libzfs_core.c b/lib/libzfs_core/libzfs_core.c
+index 76a0798..0dd32a2 100644
+--- a/lib/libzfs_core/libzfs_core.c
++++ b/lib/libzfs_core/libzfs_core.c
+@@ -171,11 +171,11 @@ out:
+ }
+ 
+ int
+-lzc_create(const char *fsname, dmu_objset_type_t type, nvlist_t *props)
++lzc_create(const char *fsname, enum lzc_dataset_type type, nvlist_t *props)
+ {
+ 	int error;
+ 	nvlist_t *args = fnvlist_alloc();
+-	fnvlist_add_int32(args, "type", type);
++	fnvlist_add_int32(args, "type", (dmu_objset_type_t)type);
+ 	if (props != NULL)
+ 		fnvlist_add_nvlist(args, "props", props);
+ 	error = lzc_ioctl(ZFS_IOC_CREATE, fsname, args, NULL);
+diff --git a/include/libzfs_core.h b/include/libzfs_core.h
+index 938afbb..6b4575d 100644
+--- a/include/libzfs_core.h
++++ b/include/libzfs_core.h
+@@ -30,7 +30,6 @@
+ #include <libnvpair.h>
+ #include <sys/param.h>
+ #include <sys/types.h>
+-#include <sys/fs/zfs.h>
+ 
+ #ifdef	__cplusplus
+ extern "C" {
+@@ -39,8 +38,16 @@ extern "C" {
+ int libzfs_core_init(void);
+ void libzfs_core_fini(void);
+ 
++/*
++ * NB: this type should be kept binary compatible with dmu_objset_type_t.
++ */
++enum lzc_dataset_type {
++	LZC_DATSET_TYPE_ZFS = 2,
++	LZC_DATSET_TYPE_ZVOL
++};
++
+ int lzc_snapshot(nvlist_t *, nvlist_t *, nvlist_t **);
+-int lzc_create(const char *, dmu_objset_type_t, nvlist_t *);
++int lzc_create(const char *, enum lzc_dataset_type, nvlist_t *);
+ int lzc_clone(const char *, const char *, nvlist_t *);
+ int lzc_destroy_snaps(nvlist_t *, boolean_t, nvlist_t **);
+ int lzc_bookmark(nvlist_t *, nvlist_t **);
+diff --git a/include/sys/fs/zfs.h b/include/sys/fs/zfs.h
+index 7ecd889..cf1df23 100644
+--- a/include/sys/fs/zfs.h
++++ b/include/sys/fs/zfs.h
+@@ -54,6 +54,10 @@ typedef enum {
+ 	ZFS_TYPE_BOOKMARK	= (1 << 4)
+ } zfs_type_t;
+ 
++/*
++ * NB: lzc_dataset_type should be updated whenever a new objset type is added,
++ * if it represents a real type of a dataset that can be created from userland.
++ */
+ typedef enum dmu_objset_type {
+ 	DMU_OST_NONE,
+ 	DMU_OST_META,
+-- 
+1.8.3.1
+

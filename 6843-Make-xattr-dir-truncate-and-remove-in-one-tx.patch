@@ -1,0 +1,56 @@
+From 399cc7d5d9aff97c714b708af3e3f0280ceab93f Mon Sep 17 00:00:00 2001
+From: Chunwei Chen <tuxoko@gmail.com>
+Date: Fri, 25 Mar 2016 15:25:29 -0400
+Subject: [PATCH] 6843 Make xattr dir truncate and remove in one tx Reviewed
+ by: Brian Behlendorf <behlendorf1@llnl.gov> Reviewed by: Dan McDonald
+ <danmcd@omniti.com> Reviewed by: Matthew Ahrens <mahrens@delphix.com>
+ Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ module/zfs/zfs_dir.c | 28 +++++++++++++++++-----------
+ 1 file changed, 17 insertions(+), 11 deletions(-)
+
+diff --git a/module/zfs/zfs_dir.c b/module/zfs/zfs_dir.c
+index c2f876e..2b18ecb 100644
+--- a/module/zfs/zfs_dir.c
++++ b/module/zfs/zfs_dir.c
+@@ -606,19 +606,25 @@ zfs_rmnode(znode_t *zp)
+ 			zfs_znode_free(zp);
+ 			return;
+ 		}
+-	}
+-
+-	/*
+-	 * Free up all the data in the file.
+-	 */
+-	error = dmu_free_long_range(os, zp->z_id, 0, DMU_OBJECT_END);
+-	if (error) {
++	} else {
+ 		/*
+-		 * Not enough space.  Leave the file in the unlinked set.
++		 * Free up all the data in the file.  We don't do this for
++		 * XATTR directories because we need truncate and remove to be
++		 * in the same tx, like in zfs_znode_delete(). Otherwise, if
++		 * we crash here we'll end up with an inconsistent truncated
++		 * zap object in the delete queue.  Note a truncated file is
++		 * harmless since it only contains user data.
+ 		 */
+-		zfs_znode_dmu_fini(zp);
+-		zfs_znode_free(zp);
+-		return;
++		error = dmu_free_long_range(os, zp->z_id, 0, DMU_OBJECT_END);
++		if (error) {
++			/*
++			 * Not enough space.  Leave the file in the unlinked
++			 * set.
++			 */
++			zfs_znode_dmu_fini(zp);
++			zfs_znode_free(zp);
++			return;
++		}
+ 	}
+ 
+ 	/*
+-- 
+1.8.3.1
+

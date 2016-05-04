@@ -1,0 +1,39 @@
+From e4cb59f791c5c6dea7ad4caa6dee845024ce71ef Mon Sep 17 00:00:00 2001
+From: Alexander Pyhalov <apyhalov@gmail.com>
+Date: Fri, 25 Mar 2016 09:02:04 -0700
+Subject: [PATCH] 6781 zpool man page needs updated to remove duplicate entry
+ of "cannot be" where it discusses cache devices Reviewed by: Toomas Soome
+ <tsoome@me.com> Reviewed by: Robert Mustacchi <rm@joyent.com> Approved by:
+ Matthew Ahrens <mahrens@delphix.com>
+
+---
+ usr/src/man/man1m/zpool.1m | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/usr/src/man/man1m/zpool.1m b/usr/src/man/man1m/zpool.1m
+index c525623..30145db 100644
+--- a/usr/src/man/man1m/zpool.1m
++++ b/usr/src/man/man1m/zpool.1m
+@@ -23,7 +23,7 @@
+ .\" Copyright (c) 2013 by Delphix. All rights reserved.
+ .\" Copyright 2016 Nexenta Systems, Inc.
+ .\"
+-.Dd February 15, 2016
++.Dd March 25, 2016
+ .Dt ZPOOL 1M
+ .Os
+ .Sh NAME
+@@ -235,8 +235,8 @@ see the
+ .Sx Intent Log
+ section.
+ .It Sy cache
+-A device used to cache storage pool data. A cache device cannot be cannot be
+-configured as a mirror or raidz group. For more information, see the
++A device used to cache storage pool data. A cache device cannot be configured
++as a mirror or raidz group. For more information, see the
+ .Sx Cache Devices
+ section.
+ .El
+-- 
+1.8.3.1
+

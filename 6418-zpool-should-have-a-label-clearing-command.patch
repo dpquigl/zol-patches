@@ -1,0 +1,605 @@
+From 6401734d545a04c18f68b448202f9d9a77216bb9 Mon Sep 17 00:00:00 2001
+From: Will Andrews <will@firepipe.net>
+Date: Fri, 8 Apr 2016 20:53:52 -0700
+Subject: [PATCH] 6418 zpool should have a label clearing command Reviewed by:
+ Yuri Pankov <yuri.pankov@nexenta.com> Reviewed by: Matthew Ahrens
+ <mahrens@delphix.com> Reviewed by: George Wilson <george.wilson@delphix.com>
+ Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ cmd/syseventd/modules/zfs_mod/zfs_mod.c |   3 +-
+ cmd/zdb/zdb.c                           |   5 +-
+ cmd/zpool/zpool_main.c                  | 155 +++++++++++++++++++++++-
+ cmd/zpool/zpool_vdev.c                  |   8 +-
+ include/libzfs.h              |   5 +-
+ lib/libzfs/libzfs_import.c       |  16 ++-
+ lib/libzfs/libzfs_pool.c         |  51 ++++++--
+ lib/libzfs/mapfile-vers          |   1 +
+ usr/src/man/man1m/zpool.1m                      |  21 +++-
+ include/sys/fs/zfs.h                 |   4 +
+ 10 files changed, 234 insertions(+), 35 deletions(-)
+
+diff --git a/cmd/syseventd/modules/zfs_mod/zfs_mod.c b/cmd/syseventd/modules/zfs_mod/zfs_mod.c
+index 87b4e29..dae69d1 100644
+--- a/cmd/syseventd/modules/zfs_mod/zfs_mod.c
++++ b/cmd/syseventd/modules/zfs_mod/zfs_mod.c
+@@ -209,7 +209,8 @@ zfs_process_add(zpool_handle_t *zhp, nvlist_t *vdev, boolean_t isdisk)
+ 		 * trigger a ZFS fault for the device (and any hot spare
+ 		 * replacement).
+ 		 */
+-		if (strncmp(path, "/dev/dsk/", 9) != 0) {
++		if (strncmp(path, ZFS_DISK_ROOTD,
++		    strlen(ZFS_DISK_ROOTD)) != 0) {
+ 			(void) zpool_vdev_online(zhp, fullpath,
+ 			    ZFS_ONLINE_FORCEFAULT, &newstate);
+ 			return;
+diff --git a/cmd/zdb/zdb.c b/cmd/zdb/zdb.c
+index 4d609a7..7ed097f 100644
+--- a/cmd/zdb/zdb.c
++++ b/cmd/zdb/zdb.c
+@@ -2133,10 +2133,11 @@ dump_label(const char *dev)
+ 	uint64_t psize, ashift;
+ 	int len = strlen(dev) + 1;
+ 
+-	if (strncmp(dev, "/dev/dsk/", 9) == 0) {
++	if (strncmp(dev, ZFS_DISK_ROOTD, strlen(ZFS_DISK_ROOTD)) == 0) {
+ 		len++;
+ 		path = malloc(len);
+-		(void) snprintf(path, len, "%s%s", "/dev/rdsk/", dev + 9);
++		(void) snprintf(path, len, "%s%s", ZFS_RDISK_ROOTD,
++		    dev + strlen(ZFS_DISK_ROOTD));
+ 	} else {
+ 		path = strdup(dev);
+ 	}
+diff --git a/cmd/zpool/zpool_main.c b/cmd/zpool/zpool_main.c
+index cef01c1..82b9672 100644
+--- a/cmd/zpool/zpool_main.c
++++ b/cmd/zpool/zpool_main.c
+@@ -21,11 +21,11 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2012 by Frederik Wessels. All rights reserved.
+  * Copyright (c) 2013 by Prasad Joshi (sTec). All rights reserved.
+  * Copyright 2016 Igor Kozhukhov <ikozhukhov@gmail.com>.
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ #include <assert.h>
+@@ -62,6 +62,7 @@ static int zpool_do_destroy(int, char **);
+ 
+ static int zpool_do_add(int, char **);
+ static int zpool_do_remove(int, char **);
++static int zpool_do_labelclear(int, char **);
+ 
+ static int zpool_do_list(int, char **);
+ static int zpool_do_iostat(int, char **);
+@@ -121,6 +122,7 @@ typedef enum {
+ 	HELP_HISTORY,
+ 	HELP_IMPORT,
+ 	HELP_IOSTAT,
++	HELP_LABELCLEAR,
+ 	HELP_LIST,
+ 	HELP_OFFLINE,
+ 	HELP_ONLINE,
+@@ -159,6 +161,8 @@ static zpool_command_t command_table[] = {
+ 	{ "add",	zpool_do_add,		HELP_ADD		},
+ 	{ "remove",	zpool_do_remove,	HELP_REMOVE		},
+ 	{ NULL },
++	{ "labelclear",	zpool_do_labelclear,	HELP_LABELCLEAR		},
++	{ NULL },
+ 	{ "list",	zpool_do_list,		HELP_LIST		},
+ 	{ "iostat",	zpool_do_iostat,	HELP_IOSTAT		},
+ 	{ "status",	zpool_do_status,	HELP_STATUS		},
+@@ -228,6 +232,8 @@ get_usage(zpool_help_t idx)
+ 	case HELP_IOSTAT:
+ 		return (gettext("\tiostat [-v] [-T d|u] [pool] ... [interval "
+ 		    "[count]]\n"));
++	case HELP_LABELCLEAR:
++		return (gettext("\tlabelclear [-f] <vdev>\n"));
+ 	case HELP_LIST:
+ 		return (gettext("\tlist [-Hp] [-o property[,...]] "
+ 		    "[-T d|u] [pool] ... [interval [count]]\n"));
+@@ -618,6 +624,149 @@ zpool_do_remove(int argc, char **argv)
+ }
+ 
+ /*
++ * zpool labelclear [-f] <vdev>
++ *
++ *	-f	Force clearing the label for the vdevs which are members of
++ *		the exported or foreign pools.
++ *
++ * Verifies that the vdev is not active and zeros out the label information
++ * on the device.
++ */
++int
++zpool_do_labelclear(int argc, char **argv)
++{
++	char vdev[MAXPATHLEN];
++	char *name = NULL;
++	struct stat st;
++	int c, fd, ret = 0;
++	nvlist_t *config;
++	pool_state_t state;
++	boolean_t inuse = B_FALSE;
++	boolean_t force = B_FALSE;
++
++	/* check options */
++	while ((c = getopt(argc, argv, "f")) != -1) {
++		switch (c) {
++		case 'f':
++			force = B_TRUE;
++			break;
++		default:
++			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
++			    optopt);
++			usage(B_FALSE);
++		}
++	}
++
++	argc -= optind;
++	argv += optind;
++
++	/* get vdev name */
++	if (argc < 1) {
++		(void) fprintf(stderr, gettext("missing vdev name\n"));
++		usage(B_FALSE);
++	}
++	if (argc > 1) {
++		(void) fprintf(stderr, gettext("too many arguments\n"));
++		usage(B_FALSE);
++	}
++
++	/*
++	 * Check if we were given absolute path and use it as is.
++	 * Otherwise if the provided vdev name doesn't point to a file,
++	 * try prepending dsk path and appending s0.
++	 */
++	(void) strlcpy(vdev, argv[0], sizeof (vdev));
++	if (vdev[0] != '/' && stat(vdev, &st) != 0) {
++		char *s;
++
++		(void) snprintf(vdev, sizeof (vdev), "%s/%s",
++		    ZFS_DISK_ROOT, argv[0]);
++		if ((s = strrchr(argv[0], 's')) == NULL ||
++		    !isdigit(*(s + 1)))
++			(void) strlcat(vdev, "s0", sizeof (vdev));
++		if (stat(vdev, &st) != 0) {
++			(void) fprintf(stderr, gettext(
++			    "failed to find device %s, try specifying absolute "
++			    "path instead\n"), argv[0]);
++			return (1);
++		}
++	}
++
++	if ((fd = open(vdev, O_RDWR)) < 0) {
++		(void) fprintf(stderr, gettext("failed to open %s: %s\n"),
++		    vdev, strerror(errno));
++		return (1);
++	}
++
++	if (zpool_read_label(fd, &config) != 0 || config == NULL) {
++		(void) fprintf(stderr,
++		    gettext("failed to read label from %s\n"), vdev);
++		return (1);
++	}
++	nvlist_free(config);
++
++	ret = zpool_in_use(g_zfs, fd, &state, &name, &inuse);
++	if (ret != 0) {
++		(void) fprintf(stderr,
++		    gettext("failed to check state for %s\n"), vdev);
++		return (1);
++	}
++
++	if (!inuse)
++		goto wipe_label;
++
++	switch (state) {
++	default:
++	case POOL_STATE_ACTIVE:
++	case POOL_STATE_SPARE:
++	case POOL_STATE_L2CACHE:
++		(void) fprintf(stderr, gettext(
++		    "%s is a member (%s) of pool \"%s\"\n"),
++		    vdev, zpool_pool_state_to_name(state), name);
++		ret = 1;
++		goto errout;
++
++	case POOL_STATE_EXPORTED:
++		if (force)
++			break;
++		(void) fprintf(stderr, gettext(
++		    "use '-f' to override the following error:\n"
++		    "%s is a member of exported pool \"%s\"\n"),
++		    vdev, name);
++		ret = 1;
++		goto errout;
++
++	case POOL_STATE_POTENTIALLY_ACTIVE:
++		if (force)
++			break;
++		(void) fprintf(stderr, gettext(
++		    "use '-f' to override the following error:\n"
++		    "%s is a member of potentially active pool \"%s\"\n"),
++		    vdev, name);
++		ret = 1;
++		goto errout;
++
++	case POOL_STATE_DESTROYED:
++		/* inuse should never be set for a destroyed pool */
++		assert(0);
++		break;
++	}
++
++wipe_label:
++	ret = zpool_clear_label(fd);
++	if (ret != 0) {
++		(void) fprintf(stderr,
++		    gettext("failed to clear label for %s\n"), vdev);
++	}
++
++errout:
++	free(name);
++	(void) close(fd);
++
++	return (ret);
++}
++
++/*
+  * zpool create [-fnd] [-o property=value] ...
+  *		[-O file-system-property=value] ...
+  *		[-R root] [-m mountpoint] <pool> <dev> ...
+@@ -1179,7 +1328,7 @@ print_status_config(zpool_handle_t *zhp, const char *name, nvlist_t *nv,
+ 	char *vname;
+ 	uint64_t notpresent;
+ 	spare_cbdata_t cb;
+-	char *state;
++	const char *state;
+ 
+ 	if (nvlist_lookup_nvlist_array(nv, ZPOOL_CONFIG_CHILDREN,
+ 	    &child, &children) != 0)
+@@ -1945,7 +2094,7 @@ zpool_do_import(int argc, char **argv)
+ 
+ 	if (searchdirs == NULL) {
+ 		searchdirs = safe_malloc(sizeof (char *));
+-		searchdirs[0] = "/dev/dsk";
++		searchdirs[0] = ZFS_DISK_ROOT;
+ 		nsearch = 1;
+ 	}
+ 
+diff --git a/cmd/zpool/zpool_vdev.c b/cmd/zpool/zpool_vdev.c
+index cd496d0..3de8a9e 100644
+--- a/cmd/zpool/zpool_vdev.c
++++ b/cmd/zpool/zpool_vdev.c
+@@ -79,8 +79,6 @@
+ 
+ #include "zpool_util.h"
+ 
+-#define	DISK_ROOT	"/dev/dsk"
+-#define	RDISK_ROOT	"/dev/rdsk"
+ #define	BACKUP_SLICE	"s2"
+ 
+ /*
+@@ -367,7 +365,7 @@ is_whole_disk(const char *arg)
+ 	char	path[MAXPATHLEN];
+ 
+ 	(void) snprintf(path, sizeof (path), "%s%s%s",
+-	    RDISK_ROOT, strrchr(arg, '/'), BACKUP_SLICE);
++	    ZFS_RDISK_ROOT, strrchr(arg, '/'), BACKUP_SLICE);
+ 	if ((fd = open(path, O_RDWR | O_NDELAY)) < 0)
+ 		return (B_FALSE);
+ 	if (efi_alloc_and_init(fd, EFI_NUMPAR, &label) != 0) {
+@@ -423,7 +421,7 @@ make_leaf_vdev(const char *arg, uint64_t is_log)
+ 		 * /dev/dsk/.  As part of this check, see if we've been given a
+ 		 * an entire disk (minus the slice number).
+ 		 */
+-		(void) snprintf(path, sizeof (path), "%s/%s", DISK_ROOT,
++		(void) snprintf(path, sizeof (path), "%s/%s", ZFS_DISK_ROOT,
+ 		    arg);
+ 		wholedisk = is_whole_disk(path);
+ 		if (!wholedisk && (stat64(path, &statbuf) != 0)) {
+@@ -437,7 +435,7 @@ make_leaf_vdev(const char *arg, uint64_t is_log)
+ 			if (errno == ENOENT) {
+ 				(void) fprintf(stderr,
+ 				    gettext("cannot open '%s': no such "
+-				    "device in %s\n"), arg, DISK_ROOT);
++				    "device in %s\n"), arg, ZFS_DISK_ROOT);
+ 				(void) fprintf(stderr,
+ 				    gettext("must be a full path or "
+ 				    "shorthand device name\n"));
+diff --git a/include/libzfs.h b/include/libzfs.h
+index 65beb6b..2dbbdb3 100644
+--- a/include/libzfs.h
++++ b/include/libzfs.h
+@@ -210,7 +210,8 @@ extern zpool_handle_t *zpool_open_canfail(libzfs_handle_t *, const char *);
+ extern void zpool_close(zpool_handle_t *);
+ extern const char *zpool_get_name(zpool_handle_t *);
+ extern int zpool_get_state(zpool_handle_t *);
+-extern char *zpool_state_to_name(vdev_state_t, vdev_aux_t);
++extern const char *zpool_state_to_name(vdev_state_t, vdev_aux_t);
++extern const char *zpool_pool_state_to_name(pool_state_t);
+ extern void zpool_free_handles(libzfs_handle_t *);
+ 
+ /*
+@@ -262,7 +263,7 @@ extern nvlist_t *zpool_find_vdev(zpool_handle_t *, const char *, boolean_t *,
+     boolean_t *, boolean_t *);
+ extern nvlist_t *zpool_find_vdev_by_physpath(zpool_handle_t *, const char *,
+     boolean_t *, boolean_t *, boolean_t *);
+-extern int zpool_label_disk(libzfs_handle_t *, zpool_handle_t *, char *);
++extern int zpool_label_disk(libzfs_handle_t *, zpool_handle_t *, const char *);
+ 
+ /*
+  * Functions to manage pool properties
+diff --git a/lib/libzfs/libzfs_import.c b/lib/libzfs/libzfs_import.c
+index 032cd11..16c2681 100644
+--- a/lib/libzfs/libzfs_import.c
++++ b/lib/libzfs/libzfs_import.c
+@@ -20,10 +20,10 @@
+  */
+ 
+ /*
+- * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2013 by Delphix. All rights reserved.
+  * Copyright 2015 RackTop Systems.
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ /*
+@@ -1084,9 +1084,7 @@ zpool_open_func(void *arg)
+ }
+ 
+ /*
+- * Given a file descriptor, clear (zero) the label information.  This function
+- * is currently only used in the appliance stack as part of the ZFS sysevent
+- * module.
++ * Given a file descriptor, clear (zero) the label information.
+  */
+ int
+ zpool_clear_label(int fd)
+@@ -1131,7 +1129,7 @@ zpool_find_import_impl(libzfs_handle_t *hdl, importargs_t *iarg)
+ 	char *end, **dir = iarg->path;
+ 	size_t pathleft;
+ 	nvlist_t *ret = NULL;
+-	static char *default_dir = "/dev/dsk";
++	static char *default_dir = ZFS_DISK_ROOT;
+ 	pool_list_t pools = { 0 };
+ 	pool_entry_t *pe, *penext;
+ 	vdev_entry_t *ve, *venext;
+@@ -1153,7 +1151,7 @@ zpool_find_import_impl(libzfs_handle_t *hdl, importargs_t *iarg)
+ 	 */
+ 	for (i = 0; i < dirs; i++) {
+ 		tpool_t *t;
+-		char *rdsk;
++		char rdsk[MAXPATHLEN];
+ 		int dfd;
+ 		boolean_t config_failed = B_FALSE;
+ 		DIR *dirp;
+@@ -1174,10 +1172,10 @@ zpool_find_import_impl(libzfs_handle_t *hdl, importargs_t *iarg)
+ 		 * reading the labels skips a bunch of slow operations during
+ 		 * close(2) processing, so we replace /dev/dsk with /dev/rdsk.
+ 		 */
+-		if (strcmp(path, "/dev/dsk/") == 0)
+-			rdsk = "/dev/rdsk/";
++		if (strcmp(path, ZFS_DISK_ROOTD) == 0)
++			(void) strlcpy(rdsk, ZFS_RDISK_ROOTD, sizeof (rdsk));
+ 		else
+-			rdsk = path;
++			(void) strlcpy(rdsk, path, sizeof (rdsk));
+ 
+ 		if ((dfd = open64(rdsk, O_RDONLY)) < 0 ||
+ 		    (dirp = fdopendir(dfd)) == NULL) {
+diff --git a/lib/libzfs/libzfs_pool.c b/lib/libzfs/libzfs_pool.c
+index 1f3ab8c..40cb966 100644
+--- a/lib/libzfs/libzfs_pool.c
++++ b/lib/libzfs/libzfs_pool.c
+@@ -20,10 +20,10 @@
+  */
+ 
+ /*
+- * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+  * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright 2016 Nexenta Systems, Inc.
+  */
+ 
+ #include <ctype.h>
+@@ -49,8 +49,6 @@
+ 
+ static int read_efi_label(nvlist_t *config, diskaddr_t *sb);
+ 
+-#define	DISK_ROOT	"/dev/dsk"
+-#define	RDISK_ROOT	"/dev/rdsk"
+ #define	BACKUP_SLICE	"s2"
+ 
+ typedef struct prop_flags {
+@@ -179,7 +177,7 @@ zpool_get_prop_int(zpool_handle_t *zhp, zpool_prop_t prop, zprop_source_t *src)
+ /*
+  * Map VDEV STATE to printed strings.
+  */
+-char *
++const char *
+ zpool_state_to_name(vdev_state_t state, vdev_aux_t aux)
+ {
+ 	switch (state) {
+@@ -207,6 +205,34 @@ zpool_state_to_name(vdev_state_t state, vdev_aux_t aux)
+ }
+ 
+ /*
++ * Map POOL STATE to printed strings.
++ */
++const char *
++zpool_pool_state_to_name(pool_state_t state)
++{
++	switch (state) {
++	case POOL_STATE_ACTIVE:
++		return (gettext("ACTIVE"));
++	case POOL_STATE_EXPORTED:
++		return (gettext("EXPORTED"));
++	case POOL_STATE_DESTROYED:
++		return (gettext("DESTROYED"));
++	case POOL_STATE_SPARE:
++		return (gettext("SPARE"));
++	case POOL_STATE_L2CACHE:
++		return (gettext("L2CACHE"));
++	case POOL_STATE_UNINITIALIZED:
++		return (gettext("UNINITIALIZED"));
++	case POOL_STATE_UNAVAIL:
++		return (gettext("UNAVAIL"));
++	case POOL_STATE_POTENTIALLY_ACTIVE:
++		return (gettext("POTENTIALLY_ACTIVE"));
++	}
++
++	return (gettext("UNKNOWN"));
++}
++
++/*
+  * Get a zpool property value for 'prop' and return the value in
+  * a pre-allocated buffer.
+  */
+@@ -2127,7 +2153,8 @@ zpool_find_vdev(zpool_handle_t *zhp, const char *path, boolean_t *avail_spare,
+ 	} else if (zpool_vdev_is_interior(path)) {
+ 		verify(nvlist_add_string(search, ZPOOL_CONFIG_TYPE, path) == 0);
+ 	} else if (path[0] != '/') {
+-		(void) snprintf(buf, sizeof (buf), "%s%s", "/dev/dsk/", path);
++		(void) snprintf(buf, sizeof (buf), "%s/%s", ZFS_DISK_ROOT,
++		    path);
+ 		verify(nvlist_add_string(search, ZPOOL_CONFIG_PATH, buf) == 0);
+ 	} else {
+ 		verify(nvlist_add_string(search, ZPOOL_CONFIG_PATH, path) == 0);
+@@ -2309,7 +2336,7 @@ zpool_relabel_disk(libzfs_handle_t *hdl, const char *name)
+ 	    "efi_use_whole_disk")) == NULL)
+ 		return (-1);
+ 
+-	(void) snprintf(path, sizeof (path), "%s/%s", RDISK_ROOT, name);
++	(void) snprintf(path, sizeof (path), "%s/%s", ZFS_RDISK_ROOT, name);
+ 
+ 	if ((fd = open(path, O_RDWR | O_NDELAY)) < 0) {
+ 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "cannot "
+@@ -2384,7 +2411,7 @@ zpool_vdev_online(zpool_handle_t *zhp, const char *path, int flags,
+ 		}
+ 
+ 		if (wholedisk) {
+-			pathname += strlen(DISK_ROOT) + 1;
++			pathname += strlen(ZFS_DISK_ROOT) + 1;
+ 			(void) zpool_relabel_disk(hdl, pathname);
+ 		}
+ 	}
+@@ -3350,8 +3377,8 @@ zpool_vdev_name(libzfs_handle_t *hdl, zpool_handle_t *zhp, nvlist_t *nv,
+ 				devid_str_free(newdevid);
+ 		}
+ 
+-		if (strncmp(path, "/dev/dsk/", 9) == 0)
+-			path += 9;
++		if (strncmp(path, ZFS_DISK_ROOTD, strlen(ZFS_DISK_ROOTD)) == 0)
++			path += strlen(ZFS_DISK_ROOTD);
+ 
+ 		if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_WHOLE_DISK,
+ 		    &value) == 0 && value) {
+@@ -3773,7 +3800,7 @@ read_efi_label(nvlist_t *config, diskaddr_t *sb)
+ 	if (nvlist_lookup_string(config, ZPOOL_CONFIG_PATH, &path) != 0)
+ 		return (err);
+ 
+-	(void) snprintf(diskname, sizeof (diskname), "%s%s", RDISK_ROOT,
++	(void) snprintf(diskname, sizeof (diskname), "%s%s", ZFS_RDISK_ROOT,
+ 	    strrchr(path, '/'));
+ 	if ((fd = open(diskname, O_RDONLY|O_NDELAY)) >= 0) {
+ 		struct dk_gpt *vtoc;
+@@ -3826,7 +3853,7 @@ find_start_block(nvlist_t *config)
+  * stripped of any leading /dev path.
+  */
+ int
+-zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, char *name)
++zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, const char *name)
+ {
+ 	char path[MAXPATHLEN];
+ 	struct dk_gpt *vtoc;
+@@ -3856,7 +3883,7 @@ zpool_label_disk(libzfs_handle_t *hdl, zpool_handle_t *zhp, char *name)
+ 		start_block = NEW_START_BLOCK;
+ 	}
+ 
+-	(void) snprintf(path, sizeof (path), "%s/%s%s", RDISK_ROOT, name,
++	(void) snprintf(path, sizeof (path), "%s/%s%s", ZFS_RDISK_ROOT, name,
+ 	    BACKUP_SLICE);
+ 
+ 	if ((fd = open(path, O_RDWR | O_NDELAY)) < 0) {
+diff --git a/lib/libzfs/mapfile-vers b/lib/libzfs/mapfile-vers
+index ff0c552..bc616be 100644
+--- a/lib/libzfs/mapfile-vers
++++ b/lib/libzfs/mapfile-vers
+@@ -219,6 +219,7 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zpool_obj_to_path;
+ 	zpool_open;
+ 	zpool_open_canfail;
++	zpool_pool_state_to_name;
+ 	zpool_print_unsup_feat;
+ 	zpool_prop_align_right;
+ 	zpool_prop_column_name;
+diff --git a/usr/src/man/man1m/zpool.1m b/usr/src/man/man1m/zpool.1m
+index 30145db..eadb548 100644
+--- a/usr/src/man/man1m/zpool.1m
++++ b/usr/src/man/man1m/zpool.1m
+@@ -23,7 +23,7 @@
+ .\" Copyright (c) 2013 by Delphix. All rights reserved.
+ .\" Copyright 2016 Nexenta Systems, Inc.
+ .\"
+-.Dd March 25, 2016
++.Dd March 30, 2016
+ .Dt ZPOOL 1M
+ .Os
+ .Sh NAME
+@@ -103,6 +103,10 @@
+ .Oo Ar pool Oc Ns ...
+ .Op Ar interval Op Ar count
+ .Nm
++.Cm labelclear
++.Op Fl f
++.Ar device
++.Nm
+ .Cm list
+ .Op Fl Hpv
+ .Op Fl o Ar property Ns Oo , Ns Ar property Oc Ns ...
+@@ -1154,6 +1158,21 @@ pool, in addition to the pool-wide statistics.
+ .El
+ .It Xo
+ .Nm
++.Cm labelclear
++.Op Fl f
++.Ar device
++.Xc
++Removes ZFS label information from the specified
++.Ar device .
++The
++.Ar device
++must not be part of an active pool configuration.
++.Bl -tag -width Ds
++.It Fl f
++Treat exported or foreign devices as inactive.
++.El
++.It Xo
++.Nm
+ .Cm list
+ .Op Fl Hpv
+ .Op Fl o Ar property Ns Oo , Ns Ar property Oc Ns ...
+diff --git a/include/sys/fs/zfs.h b/include/sys/fs/zfs.h
+index f6f913c..5d52f81 100644
+--- a/include/sys/fs/zfs.h
++++ b/include/sys/fs/zfs.h
+@@ -768,6 +768,10 @@ typedef struct ddt_histogram {
+ #define	ZVOL_DRIVER	"zvol"
+ #define	ZFS_DRIVER	"zfs"
+ #define	ZFS_DEV		"/dev/zfs"
++#define	ZFS_DISK_ROOT	"/dev/dsk"
++#define	ZFS_DISK_ROOTD	ZFS_DISK_ROOT "/"
++#define	ZFS_RDISK_ROOT	"/dev/rdsk"
++#define	ZFS_RDISK_ROOTD	ZFS_RDISK_ROOT "/"
+ 
+ /* general zvol path */
+ #define	ZVOL_DIR		"/dev/zvol"
+-- 
+1.8.3.1
+

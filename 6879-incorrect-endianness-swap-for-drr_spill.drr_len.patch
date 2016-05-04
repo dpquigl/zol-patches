@@ -1,0 +1,28 @@
+From 20fea7a47472aceb64d3ed48cc2a3ea268bc4795 Mon Sep 17 00:00:00 2001
+From: Dan Kimmel <dan.kimmel@delphix.com>
+Date: Tue, 19 Apr 2016 21:17:10 -0700
+Subject: [PATCH] 6879 incorrect endianness swap for drr_spill.drr_length in
+ libzfs_sendrecv.c Reviewed by: Matthew Ahrens <mahrens@delphix.com> Reviewed
+ by: Paul Dagnelie <pcd@delphix.com> Approved by: Robert Mustacchi
+ <rm@joyent.com>
+
+---
+ lib/libzfs/libzfs_sendrecv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/libzfs/libzfs_sendrecv.c b/lib/libzfs/libzfs_sendrecv.c
+index 456ad3b..988bbe3 100644
+--- a/lib/libzfs/libzfs_sendrecv.c
++++ b/lib/libzfs/libzfs_sendrecv.c
+@@ -2825,7 +2825,7 @@ recv_skip(libzfs_handle_t *hdl, int fd, boolean_t byteswap)
+ 			break;
+ 		case DRR_SPILL:
+ 			if (byteswap) {
+-				drr->drr_u.drr_write.drr_length =
++				drr->drr_u.drr_spill.drr_length =
+ 				    BSWAP_64(drr->drr_u.drr_spill.drr_length);
+ 			}
+ 			(void) recv_read(hdl, fd, buf,
+-- 
+1.8.3.1
+

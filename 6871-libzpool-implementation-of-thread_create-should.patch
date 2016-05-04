@@ -1,0 +1,54 @@
+From 8fc922875ed266f52ccd5cc6f973b9ad0839c710 Mon Sep 17 00:00:00 2001
+From: Eli Rosenthal <eli.rosenthal@delphix.com>
+Date: Tue, 19 Apr 2016 20:54:59 -0700
+Subject: [PATCH] 6871 libzpool implementation of thread_create should enforce
+ length is 0 Reviewed by: Paul Dagnelie <pcd@delphix.com> Reviewed by: Matthew
+ Ahrens <mahrens@delphix.com> Approved by: Robert Mustacchi <rm@joyent.com>
+
+---
+ lib/libzpool/kernel.c          | 3 ++-
+ include/sys/zfs_context.h | 4 ++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/lib/libzpool/kernel.c b/lib/libzpool/kernel.c
+index b0f49bf..4160f1d 100644
+--- a/lib/libzpool/kernel.c
++++ b/lib/libzpool/kernel.c
+@@ -69,10 +69,11 @@ struct proc p0;
+  */
+ /*ARGSUSED*/
+ kthread_t *
+-zk_thread_create(void (*func)(), void *arg)
++zk_thread_create(void (*func)(), void *arg, uint64_t len)
+ {
+ 	thread_t tid;
+ 
++	ASSERT0(len);
+ 	VERIFY(thr_create(0, 0, (void *(*)(void *))func, arg, THR_DETACHED,
+ 	    &tid) == 0);
+ 
+diff --git a/include/sys/zfs_context.h b/include/sys/zfs_context.h
+index d151dd0..94d5987 100644
+--- a/include/sys/zfs_context.h
++++ b/include/sys/zfs_context.h
+@@ -180,7 +180,7 @@ extern int aok;
+ typedef struct kthread kthread_t;
+ 
+ #define	thread_create(stk, stksize, func, arg, len, pp, state, pri)	\
+-	zk_thread_create(func, arg)
++	zk_thread_create(func, arg, len)
+ #define	thread_exit() thr_exit(NULL)
+ #define	thread_join(t)	panic("libzpool cannot join threads")
+ 
+@@ -196,7 +196,7 @@ extern struct proc p0;
+ 
+ #define	PS_NONE		-1
+ 
+-extern kthread_t *zk_thread_create(void (*func)(), void *arg);
++extern kthread_t *zk_thread_create(void (*func)(), void *arg, uint64_t len);
+ 
+ #define	issig(why)	(FALSE)
+ #define	ISSIG(thr, why)	(FALSE)
+-- 
+1.8.3.1
+

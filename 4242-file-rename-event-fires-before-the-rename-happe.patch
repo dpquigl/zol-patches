@@ -1,0 +1,660 @@
+From 54207fd2e1e7ed01d0416da8cf296dbef920fbfc Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Wed, 24 Feb 2016 15:00:37 +0000
+Subject: [PATCH] 4242 file rename event fires before the rename happens
+ Reviewed by: Robert Mustacchi <rm@joyent.com> Reviewed by: Marcel Telka
+ <marcel@telka.sk> Approved by: Dan McDonald <danmcd@omniti.com>
+
+---
+ usr/src/uts/common/fs/nfs/nfs4_deleg_ops.c |  5 +++
+ usr/src/uts/common/fs/pcfs/pc_dir.c        | 63 ++++++++++++++++--------------
+ usr/src/uts/common/fs/smbsrv/smb_fem.c     |  3 ++
+ usr/src/uts/common/fs/tmpfs/tmp_vnops.c    | 35 ++++++++++++-----
+ usr/src/uts/common/fs/udfs/udf_vnops.c     | 24 +++++++++++-
+ usr/src/uts/common/fs/ufs/ufs_vnops.c      | 37 ++++++++++++------
+ usr/src/uts/common/fs/vnode.c              | 30 ++++++++++++++
+ module/zfs/zfs_vnops.c      | 21 +++++++---
+ include/sys/vnode.h             | 18 ++++++++-
+ 9 files changed, 176 insertions(+), 60 deletions(-)
+
+diff --git a/usr/src/uts/common/fs/nfs/nfs4_deleg_ops.c b/usr/src/uts/common/fs/nfs/nfs4_deleg_ops.c
+index bc29ee8..391eb1a 100644
+--- a/usr/src/uts/common/fs/nfs/nfs4_deleg_ops.c
++++ b/usr/src/uts/common/fs/nfs/nfs4_deleg_ops.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2015 Joyent, Inc.
+  */
+ 
+ #include <sys/systm.h>
+@@ -366,10 +367,12 @@ deleg_rd_vnevent(femarg_t *arg, vnevent_t vnevent, vnode_t *dvp, char *name,
+ 
+ 	switch (vnevent) {
+ 	case VE_REMOVE:
++	case VE_PRE_RENAME_DEST:
+ 	case VE_RENAME_DEST:
+ 		trunc = TRUE;
+ 		/*FALLTHROUGH*/
+ 
++	case VE_PRE_RENAME_SRC:
+ 	case VE_RENAME_SRC:
+ 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+ 		rfs4_recall_deleg(fp, trunc, NULL);
+@@ -404,10 +407,12 @@ deleg_wr_vnevent(femarg_t *arg, vnevent_t vnevent, vnode_t *dvp, char *name,
+ 
+ 	switch (vnevent) {
+ 	case VE_REMOVE:
++	case VE_PRE_RENAME_DEST:
+ 	case VE_RENAME_DEST:
+ 		trunc = TRUE;
+ 		/*FALLTHROUGH*/
+ 
++	case VE_PRE_RENAME_SRC:
+ 	case VE_RENAME_SRC:
+ 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+ 		rfs4_recall_deleg(fp, trunc, NULL);
+diff --git a/usr/src/uts/common/fs/pcfs/pc_dir.c b/usr/src/uts/common/fs/pcfs/pc_dir.c
+index a9ee604..976715e 100644
+--- a/usr/src/uts/common/fs/pcfs/pc_dir.c
++++ b/usr/src/uts/common/fs/pcfs/pc_dir.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2015 Joyent, Inc.
+  */
+ 
+ #include <sys/param.h>
+@@ -560,7 +561,7 @@ pc_rename(
+ 	caller_context_t *ctp)
+ {
+ 	struct pcnode *pcp;	/* pcnode we are trying to rename */
+-	struct pcnode *tpcp;	/* pcnode that's in our way */
++	struct pcnode *tpcp = NULL; /* pcnode that's in our way */
+ 	struct pcslot slot;
+ 	int error;
+ 	struct vnode *vp = PCTOV(dp);
+@@ -641,8 +642,6 @@ top:
+ 		newisdir = tpcp->pc_entry.pcd_attr & PCA_DIR;
+ 
+ 		brelse(slot.sl_bp);
+-		vnevent_rename_dest(PCTOV(tpcp), PCTOV(tdp), tnm, ctp);
+-		VN_RELE(PCTOV(tpcp));
+ 
+ 		/*
+ 		 * Error cases (from rename(2)):
+@@ -658,6 +657,10 @@ top:
+ 				error = pc_dirremove(tdp, tnm,
+ 				    (struct vnode *)NULL, VREG, ctp);
+ 				if (error == 0) {
++					vnevent_rename_dest(PCTOV(tpcp),
++					    PCTOV(tdp), tnm, ctp);
++					VN_RELE(PCTOV(tpcp));
++					tpcp = NULL;
+ 					VN_RELE(PCTOV(pcp));
+ 					goto top;
+ 				}
+@@ -667,6 +670,10 @@ top:
+ 			error = pc_dirremove(tdp, tnm,
+ 			    (struct vnode *)NULL, VDIR, ctp);
+ 			if (error == 0) {
++				vnevent_rename_dest(PCTOV(tpcp), PCTOV(tdp),
++				    tnm, ctp);
++				VN_RELE(PCTOV(tpcp));
++				tpcp = NULL;
+ 				VN_RELE(PCTOV(pcp));
+ 				goto top;
+ 			}
+@@ -710,8 +717,8 @@ top:
+ 			brelse(slot.sl_bp);
+ 		ndirentries = direntries_needed(tdp, tnm);
+ 		if (ndirentries == -1) {
+-			VN_RELE(PCTOV(pcp));
+-			return (EINVAL);
++			error = EINVAL;
++			goto done;
+ 		}
+ 		/*
+ 		 * first see if we have enough space to create the new
+@@ -719,14 +726,13 @@ top:
+ 		 */
+ 		offset = pc_find_free_space(tdp, ndirentries);
+ 		if (offset == -1) {
+-			VN_RELE(PCTOV(pcp));
+-			return (ENOSPC);
++			error = ENOSPC;
++			goto done;
+ 		}
+ 
+ 		error = pc_findentry(dp, snm, &slot, &lfn_offset);
+ 		if (error) {
+-			VN_RELE(PCTOV(pcp));
+-			return (error);
++			goto done;
+ 		}
+ 		pct_lo = slot.sl_ep->pcd_scluster_lo;
+ 		if (IS_FAT32(fsp))
+@@ -745,9 +751,8 @@ top:
+ 			brelse(slot.sl_bp);
+ 			error = pc_remove_long_fn(dp, lfn_offset);
+ 			if (error) {
+-				VN_RELE(PCTOV(pcp));
+ 				pc_mark_irrecov(VFSTOPCFS(vp->v_vfsp));
+-				return (error);
++				goto done;
+ 			}
+ 		} else {
+ 			slot.sl_ep->pcd_filename[0] =
+@@ -757,9 +762,9 @@ top:
+ 			brelse(slot.sl_bp);
+ 		}
+ 		if (error) {
+-			VN_RELE(PCTOV(pcp));
+ 			pc_mark_irrecov(VFSTOPCFS(vp->v_vfsp));
+-			return (EIO);
++			error = EIO;
++			goto done;
+ 		}
+ 
+ 		/*
+@@ -767,23 +772,21 @@ top:
+ 		 */
+ 		direntries = pc_name_to_pcdir(tdp, tnm, ndirentries, &error);
+ 		if (direntries == NULL) {
+-			VN_RELE(PCTOV(pcp));
+-			return (error);
++			goto done;
+ 		}
++
+ 		error = pc_makedirentry(tdp, direntries, ndirentries, NULL,
+ 		    offset);
+ 		kmem_free(direntries, ndirentries * sizeof (struct pcdir));
+ 		if (error) {
+-			VN_RELE(PCTOV(pcp));
+-			return (error);
++			goto done;
+ 		}
+ 		/* advance to short name */
+ 		offset += (ndirentries - 1)  * sizeof (struct pcdir);
+ 		boff = pc_blkoff(fsp, offset);
+ 		error = pc_blkatoff(tdp, offset, &bp, &ep);
+ 		if (error) {
+-			VN_RELE(PCTOV(pcp));
+-			return (error);
++			goto done;
+ 		}
+ 		blkno = pc_daddrdb(fsp, bp->b_blkno);
+ 		ep->pcd_scluster_lo = pct_lo;
+@@ -806,28 +809,30 @@ top:
+ 		pcp->pc_flags |= PC_CHG;
+ 		brelse(bp);
+ 		if (error) {
+-			VN_RELE(PCTOV(pcp));
+ 			pc_mark_irrecov(VFSTOPCFS(vp->v_vfsp));
+-			return (EIO);
++			error = EIO;
++			goto done;
+ 		}
+ 		/* No need to fix ".." if we're renaming within a dir */
+ 		if (oldisdir && dp != tdp) {
+ 			if ((error = pc_dirfixdotdot(pcp, dp, tdp)) != 0) {
+-				VN_RELE(PCTOV(pcp));
+-				return (error);
++				goto done;
+ 			}
+ 		}
+ 		if ((error = pc_nodeupdate(pcp)) != 0) {
+-			VN_RELE(PCTOV(pcp));
+-			return (error);
++			goto done;
+ 		}
+ 	}
+-out:
+-	vnevent_rename_src(PCTOV(pcp), PCTOV(dp), snm, ctp);
+-	if (dp != tdp) {
+-		vnevent_rename_dest_dir(PCTOV(tdp), ctp);
++
++	if (error == 0) {
++		vnevent_rename_src(PCTOV(pcp), PCTOV(dp), snm, ctp);
++		if (dp != tdp)
++			vnevent_rename_dest_dir(PCTOV(tdp), ctp);
+ 	}
+ 
++done:
++	if (tpcp != NULL)
++		VN_RELE(PCTOV(tpcp));
+ 	VN_RELE(PCTOV(pcp));
+ 
+ 	return (error);
+diff --git a/usr/src/uts/common/fs/smbsrv/smb_fem.c b/usr/src/uts/common/fs/smbsrv/smb_fem.c
+index 41c7475..896863f 100644
+--- a/usr/src/uts/common/fs/smbsrv/smb_fem.c
++++ b/usr/src/uts/common/fs/smbsrv/smb_fem.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2013 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright 2015 Joyent, Inc.
+  */
+ 
+ #include <smbsrv/smb_kproto.h>
+@@ -572,11 +573,13 @@ smb_fem_oplock_vnevent(
+ 	if (ct != &smb_ct) {
+ 		switch (vnevent) {
+ 		case VE_REMOVE:
++		case VE_PRE_RENAME_DEST:
+ 		case VE_RENAME_DEST:
+ 			flags = SMB_OPLOCK_BREAK_TO_NONE |
+ 			    SMB_OPLOCK_BREAK_BATCH;
+ 			rc = smb_fem_oplock_break(arg, ct, flags);
+ 			break;
++		case VE_PRE_RENAME_SRC:
+ 		case VE_RENAME_SRC:
+ 			flags = SMB_OPLOCK_BREAK_TO_LEVEL_II |
+ 			    SMB_OPLOCK_BREAK_BATCH;
+diff --git a/usr/src/uts/common/fs/tmpfs/tmp_vnops.c b/usr/src/uts/common/fs/tmpfs/tmp_vnops.c
+index 61607a6..3c251df 100644
+--- a/usr/src/uts/common/fs/tmpfs/tmp_vnops.c
++++ b/usr/src/uts/common/fs/tmpfs/tmp_vnops.c
+@@ -25,7 +25,7 @@
+  */
+ 
+ /*
+- * Copyright (c) 2012, Joyent, Inc. All rights reserved.
++ * Copyright (c) 2015, Joyent, Inc. All rights reserved.
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
+  */
+ 
+@@ -1185,6 +1185,7 @@ tmp_rename(
+ 	struct tmpnode *fromparent;
+ 	struct tmpnode *toparent;
+ 	struct tmpnode *fromtp = NULL;	/* source tmpnode */
++	struct tmpnode *totp;		/* target tmpnode */
+ 	struct tmount *tm = (struct tmount *)VTOTM(odvp);
+ 	int error;
+ 	int samedir = 0;	/* set if odvp == ndvp */
+@@ -1243,6 +1244,18 @@ tmp_rename(
+ 			goto done;
+ 	}
+ 
++	if (tdirlookup(toparent, nnm, &totp, cred) == 0) {
++		vnevent_pre_rename_dest(TNTOV(totp), ndvp, nnm, ct);
++		tmpnode_rele(totp);
++	}
++
++	/* Notify the target dir. if not the same as the source dir. */
++	if (ndvp != odvp) {
++		vnevent_pre_rename_dest_dir(ndvp, TNTOV(fromtp), nnm, ct);
++	}
++
++	vnevent_pre_rename_src(TNTOV(fromtp), odvp, onm, ct);
++
+ 	/*
+ 	 * Link source to new target
+ 	 */
+@@ -1262,15 +1275,6 @@ tmp_rename(
+ 			error = 0;
+ 		goto done;
+ 	}
+-	vnevent_rename_src(TNTOV(fromtp), odvp, onm, ct);
+-
+-	/*
+-	 * Notify the target directory if not same as
+-	 * source directory.
+-	 */
+-	if (ndvp != odvp) {
+-		vnevent_rename_dest_dir(ndvp, ct);
+-	}
+ 
+ 	/*
+ 	 * Unlink from source.
+@@ -1293,6 +1297,17 @@ tmp_rename(
+ 
+ 	rw_exit(&fromtp->tn_rwlock);
+ 	rw_exit(&fromparent->tn_rwlock);
++
++	if (error == 0) {
++		vnevent_rename_src(TNTOV(fromtp), odvp, onm, ct);
++		/*
++		 * vnevent_rename_dest is called in tdirenter().
++		 * Notify the target dir if not same as source dir.
++		 */
++		if (ndvp != odvp)
++			vnevent_rename_dest_dir(ndvp, ct);
++	}
++
+ done:
+ 	tmpnode_rele(fromtp);
+ 	mutex_exit(&tm->tm_renamelck);
+diff --git a/usr/src/uts/common/fs/udfs/udf_vnops.c b/usr/src/uts/common/fs/udfs/udf_vnops.c
+index 307d398..93cc4d4 100644
+--- a/usr/src/uts/common/fs/udfs/udf_vnops.c
++++ b/usr/src/uts/common/fs/udfs/udf_vnops.c
+@@ -24,7 +24,7 @@
+  */
+ 
+ /*
+- * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright 2015, Joyent, Inc.
+  */
+ 
+ #include <sys/types.h>
+@@ -914,6 +914,7 @@ udf_rename(
+ 	int32_t error = 0;
+ 	struct udf_vfs *udf_vfsp;
+ 	struct ud_inode *sip;		/* source inode */
++	struct ud_inode *tip;		/* target inode */
+ 	struct ud_inode *sdp, *tdp;	/* source and target parent inode */
+ 	struct vnode *realvp;
+ 
+@@ -974,9 +975,20 @@ udf_rename(
+ 		rw_exit(&sdp->i_contents);
+ 		goto errout;
+ 	}
++
+ 	rw_exit(&sip->i_contents);
+ 	rw_exit(&sdp->i_contents);
+ 
++	if (ud_dirlook(tdp, tnm, &tip, cr, 0) == 0) {
++		vnevent_pre_rename_dest(ITOV(tip), tdvp, tnm, ct);
++		VN_RELE(ITOV(tip));
++	}
++
++	/* Notify the target dir. if not the same as the source dir. */
++	if (sdvp != tdvp)
++		vnevent_pre_rename_dest_dir(tdvp, ITOV(sip), tnm, ct);
++
++	vnevent_pre_rename_src(ITOV(sip), sdvp, snm, ct);
+ 
+ 	/*
+ 	 * Link source to the target.
+@@ -995,7 +1007,6 @@ udf_rename(
+ 		rw_exit(&tdp->i_rwlock);
+ 		goto errout;
+ 	}
+-	vnevent_rename_src(ITOV(sip), sdvp, snm, ct);
+ 	rw_exit(&tdp->i_rwlock);
+ 
+ 	rw_enter(&sdp->i_rwlock, RW_WRITER);
+@@ -1011,6 +1022,15 @@ udf_rename(
+ 		error = 0;
+ 	}
+ 	rw_exit(&sdp->i_rwlock);
++
++	if (error == 0) {
++		vnevent_rename_src(ITOV(sip), sdvp, snm, ct);
++		/*
++		 * vnevent_rename_dest and vnevent_rename_dest_dir are called
++		 * in ud_direnter().
++		 */
++	}
++
+ errout:
+ 	ITIMES(sdp);
+ 	ITIMES(tdp);
+diff --git a/usr/src/uts/common/fs/ufs/ufs_vnops.c b/usr/src/uts/common/fs/ufs/ufs_vnops.c
+index b0f0d33..cf45b48 100644
+--- a/usr/src/uts/common/fs/ufs/ufs_vnops.c
++++ b/usr/src/uts/common/fs/ufs/ufs_vnops.c
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 1984, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2013, Joyent, Inc. All rights reserved.
++ * Copyright 2015, Joyent, Inc.
+  */
+ 
+ /*	Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -3371,7 +3371,7 @@ ufs_rename(
+ 	struct vnode *tvp = NULL;	/* target vnode, if it exists */
+ 	struct vnode *realvp;
+ 	struct ufsvfs *ufsvfsp;
+-	struct ulockfs *ulp;
++	struct ulockfs *ulp = NULL;
+ 	struct ufs_slot slot;
+ 	timestruc_t now;
+ 	int error;
+@@ -3389,34 +3389,32 @@ ufs_rename(
+ 	if (VOP_REALVP(tdvp, &realvp, ct) == 0)
+ 		tdvp = realvp;
+ 
++	/* Must do this before taking locks in case of DNLC miss */
+ 	terr = ufs_eventlookup(tdvp, tnm, cr, &tvp);
+ 	serr = ufs_eventlookup(sdvp, snm, cr, &svp);
+ 
+ 	if ((serr == 0) && ((terr == 0) || (terr == ENOENT))) {
+ 		if (tvp != NULL)
+-			vnevent_rename_dest(tvp, tdvp, tnm, ct);
++			vnevent_pre_rename_dest(tvp, tdvp, tnm, ct);
+ 
+ 		/*
+ 		 * Notify the target directory of the rename event
+ 		 * if source and target directories are not the same.
+ 		 */
+ 		if (sdvp != tdvp)
+-			vnevent_rename_dest_dir(tdvp, ct);
++			vnevent_pre_rename_dest_dir(tdvp, svp, tnm, ct);
+ 
+ 		if (svp != NULL)
+-			vnevent_rename_src(svp, sdvp, snm, ct);
++			vnevent_pre_rename_src(svp, sdvp, snm, ct);
+ 	}
+ 
+-	if (tvp != NULL)
+-		VN_RELE(tvp);
+-
+ 	if (svp != NULL)
+ 		VN_RELE(svp);
+ 
+ retry_rename:
+ 	error = ufs_lockfs_begin(ufsvfsp, &ulp, ULOCKFS_RENAME_MASK);
+ 	if (error)
+-		goto out;
++		goto unlock;
+ 
+ 	if (ulp)
+ 		TRANS_BEGIN_CSYNC(ufsvfsp, issync, TOP_RENAME,
+@@ -3712,6 +3710,9 @@ retry_firstlock:
+ 		goto errout;
+ 	}
+ 
++	if (error == 0 && tvp != NULL)
++		vnevent_rename_dest(tvp, tdvp, tnm, ct);
++
+ 	/*
+ 	 * Unlink the source.
+ 	 * Remove the source entry.  ufs_dirremove() checks that the entry
+@@ -3723,6 +3724,16 @@ retry_firstlock:
+ 	    DR_RENAME, cr)) == ENOENT)
+ 		error = 0;
+ 
++	if (error == 0) {
++		vnevent_rename_src(ITOV(sip), sdvp, snm, ct);
++		/*
++		 * Notify the target directory of the rename event
++		 * if source and target directories are not the same.
++		 */
++		if (sdvp != tdvp)
++			vnevent_rename_dest_dir(tdvp, ct);
++	}
++
+ errout:
+ 	if (slot.fbp)
+ 		fbrelse(slot.fbp, S_OTHER);
+@@ -3732,15 +3743,17 @@ errout:
+ 		rw_exit(&sdp->i_rwlock);
+ 	}
+ 
+-	VN_RELE(ITOV(sip));
+-
+ unlock:
++	if (tvp != NULL)
++		VN_RELE(tvp);
++	if (sip != NULL)
++		VN_RELE(ITOV(sip));
++
+ 	if (ulp) {
+ 		TRANS_END_CSYNC(ufsvfsp, error, issync, TOP_RENAME, trans_size);
+ 		ufs_lockfs_end(ulp);
+ 	}
+ 
+-out:
+ 	return (error);
+ }
+ 
+diff --git a/usr/src/uts/common/fs/vnode.c b/usr/src/uts/common/fs/vnode.c
+index 4abb040..e6b6adf 100644
+--- a/usr/src/uts/common/fs/vnode.c
++++ b/usr/src/uts/common/fs/vnode.c
+@@ -2557,6 +2557,36 @@ vnevent_rmdir(vnode_t *vp, vnode_t *dvp, char *name, caller_context_t *ct)
+ }
+ 
+ void
++vnevent_pre_rename_src(vnode_t *vp, vnode_t *dvp, char *name,
++    caller_context_t *ct)
++{
++	if (vp == NULL || vp->v_femhead == NULL) {
++		return;
++	}
++	(void) VOP_VNEVENT(vp, VE_PRE_RENAME_SRC, dvp, name, ct);
++}
++
++void
++vnevent_pre_rename_dest(vnode_t *vp, vnode_t *dvp, char *name,
++    caller_context_t *ct)
++{
++	if (vp == NULL || vp->v_femhead == NULL) {
++		return;
++	}
++	(void) VOP_VNEVENT(vp, VE_PRE_RENAME_DEST, dvp, name, ct);
++}
++
++void
++vnevent_pre_rename_dest_dir(vnode_t *vp, vnode_t *nvp, char *name,
++    caller_context_t *ct)
++{
++	if (vp == NULL || vp->v_femhead == NULL) {
++		return;
++	}
++	(void) VOP_VNEVENT(vp, VE_PRE_RENAME_DEST_DIR, nvp, name, ct);
++}
++
++void
+ vnevent_create(vnode_t *vp, caller_context_t *ct)
+ {
+ 	if (vp == NULL || vp->v_femhead == NULL) {
+diff --git a/module/zfs/zfs_vnops.c b/module/zfs/zfs_vnops.c
+index 9f8d4f8..0ac0bd8 100644
+--- a/module/zfs/zfs_vnops.c
++++ b/module/zfs/zfs_vnops.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+  * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014 Integros [integros.com]
++ * Copyright 2015 Joyent, Inc.
+  */
+ 
+ /* Portions Copyright 2007 Jeremy Teo */
+@@ -3446,7 +3447,7 @@ zfs_rename(vnode_t *sdvp, char *snm, vnode_t *tdvp, char *tnm, cred_t *cr,
+ 	dmu_tx_t	*tx;
+ 	zfs_zlock_t	*zl;
+ 	int		cmp, serr, terr;
+-	int		error = 0;
++	int		error = 0, rm_err = 0;
+ 	int		zflg = 0;
+ 	boolean_t	waited = B_FALSE;
+ 
+@@ -3658,16 +3659,16 @@ top:
+ 		}
+ 	}
+ 
+-	vnevent_rename_src(ZTOV(szp), sdvp, snm, ct);
++	vnevent_pre_rename_src(ZTOV(szp), sdvp, snm, ct);
+ 	if (tzp)
+-		vnevent_rename_dest(ZTOV(tzp), tdvp, tnm, ct);
++		vnevent_pre_rename_dest(ZTOV(tzp), tdvp, tnm, ct);
+ 
+ 	/*
+ 	 * notify the target directory if it is not the same
+ 	 * as source directory.
+ 	 */
+ 	if (tdvp != sdvp) {
+-		vnevent_rename_dest_dir(tdvp, ct);
++		vnevent_pre_rename_dest_dir(tdvp, ZTOV(szp), tnm, ct);
+ 	}
+ 
+ 	tx = dmu_tx_create(zfsvfs->z_os);
+@@ -3711,7 +3712,7 @@ top:
+ 	}
+ 
+ 	if (tzp)	/* Attempt to remove the existing target */
+-		error = zfs_link_destroy(tdl, tzp, tx, zflg, NULL);
++		error = rm_err = zfs_link_destroy(tdl, tzp, tx, zflg, NULL);
+ 
+ 	if (error == 0) {
+ 		error = zfs_link_create(tdl, szp, tx, ZRENAMING);
+@@ -3753,6 +3754,16 @@ top:
+ 	}
+ 
+ 	dmu_tx_commit(tx);
++
++	if (tzp && rm_err == 0)
++		vnevent_rename_dest(ZTOV(tzp), tdvp, tnm, ct);
++
++	if (error == 0) {
++		vnevent_rename_src(ZTOV(szp), sdvp, snm, ct);
++		/* notify the target dir if it is not the same as source dir */
++		if (tdvp != sdvp)
++			vnevent_rename_dest_dir(tdvp, ct);
++	}
+ out:
+ 	if (zl != NULL)
+ 		zfs_rename_unlock(&zl);
+diff --git a/include/sys/vnode.h b/include/sys/vnode.h
+index af9516f..e4d43ce 100644
+--- a/include/sys/vnode.h
++++ b/include/sys/vnode.h
+@@ -724,7 +724,12 @@ typedef enum symfollow	symfollow_t;
+ typedef enum vcexcl	vcexcl_t;
+ typedef enum create	create_t;
+ 
+-/* Vnode Events - Used by VOP_VNEVENT */
++/*
++ * Vnode Events - Used by VOP_VNEVENT
++ * The VE_PRE_RENAME_* events fire before the rename operation and are
++ * primarily used for specialized applications, such as NFSv4 delegation, which
++ * need to know about rename before it occurs.
++ */
+ typedef enum vnevent	{
+ 	VE_SUPPORT	= 0,	/* Query */
+ 	VE_RENAME_SRC	= 1,	/* Rename, with vnode as source */
+@@ -735,7 +740,10 @@ typedef enum vnevent	{
+ 	VE_LINK		= 6, 	/* Link with vnode's name as source */
+ 	VE_RENAME_DEST_DIR	= 7, 	/* Rename with vnode as target dir */
+ 	VE_MOUNTEDOVER	= 8, 	/* File or Filesystem got mounted over vnode */
+-	VE_TRUNCATE = 9		/* Truncate */
++	VE_TRUNCATE = 9,	/* Truncate */
++	VE_PRE_RENAME_SRC = 10,	/* Pre-rename, with vnode as source */
++	VE_PRE_RENAME_DEST = 11, /* Pre-rename, with vnode as target/dest. */
++	VE_PRE_RENAME_DEST_DIR = 12 /* Pre-rename with vnode as target dir */
+ } vnevent_t;
+ 
+ /*
+@@ -1294,6 +1302,12 @@ void	vnevent_rename_dest_dir(vnode_t *, caller_context_t *ct);
+ void	vnevent_mountedover(vnode_t *, caller_context_t *);
+ void	vnevent_truncate(vnode_t *, caller_context_t *);
+ int	vnevent_support(vnode_t *, caller_context_t *);
++void	vnevent_pre_rename_src(vnode_t *, vnode_t *, char *,
++	    caller_context_t *);
++void	vnevent_pre_rename_dest(vnode_t *, vnode_t *, char *,
++	    caller_context_t *);
++void	vnevent_pre_rename_dest_dir(vnode_t *, vnode_t *, char *,
++	    caller_context_t *);
+ 
+ /* Vnode specific data */
+ void vsd_create(uint_t *, void (*)(void *));
+-- 
+1.8.3.1
+

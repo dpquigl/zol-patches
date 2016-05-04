@@ -1,0 +1,167 @@
+From c5d1600c3eb0a58e493be9019c5fb8eaec72cb81 Mon Sep 17 00:00:00 2001
+From: Matthew Ahrens <mahrens@delphix.com>
+Date: Tue, 19 Apr 2016 21:13:45 -0700
+Subject: [PATCH] 6880 zdb incorrectly reports feature count mismatch when
+ feature is disabled Reviewed by: George Wilson <george.wilson@delphix.com>
+ Reviewed by: Prakash Surya <prakash.surya@delphix.com> Approved by: Robert
+ Mustacchi <rm@joyent.com>
+
+---
+ cmd/zdb/zdb.c                              |  3 +-
+ usr/src/pkg/manifests/system-test-zfstest.mf       |  1 +
+ usr/src/test/zfs-tests/runfiles/delphix.run        |  2 +-
+ usr/src/test/zfs-tests/runfiles/omnios.run         |  2 +-
+ usr/src/test/zfs-tests/runfiles/openindiana.run    |  2 +-
+ .../tests/functional/cli_root/zdb/Makefile         |  5 ++-
+ .../tests/functional/cli_root/zdb/zdb_002_pos.ksh  | 51 ++++++++++++++++++++++
+ 7 files changed, 60 insertions(+), 6 deletions(-)
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/cli_root/zdb/zdb_002_pos.ksh
+
+diff --git a/cmd/zdb/zdb.c b/cmd/zdb/zdb.c
+index 7ed097f..bb02c51 100644
+--- a/cmd/zdb/zdb.c
++++ b/cmd/zdb/zdb.c
+@@ -3046,7 +3046,8 @@ dump_zpool(spa_t *spa)
+ 			uint64_t refcount;
+ 
+ 			if (!(spa_feature_table[f].fi_flags &
+-			    ZFEATURE_FLAG_PER_DATASET)) {
++			    ZFEATURE_FLAG_PER_DATASET) ||
++			    !spa_feature_is_enabled(spa, f)) {
+ 				ASSERT0(dataset_feature_count[f]);
+ 				continue;
+ 			}
+diff --git a/usr/src/pkg/manifests/system-test-zfstest.mf b/usr/src/pkg/manifests/system-test-zfstest.mf
+index 43d4b57..9516cd0 100644
+--- a/usr/src/pkg/manifests/system-test-zfstest.mf
++++ b/usr/src/pkg/manifests/system-test-zfstest.mf
+@@ -404,6 +404,7 @@ file path=opt/zfs-tests/tests/functional/clean_mirror/default.cfg mode=0555
+ file path=opt/zfs-tests/tests/functional/clean_mirror/setup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/cli_common.kshlib mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_001_neg mode=0555
++file path=opt/zfs-tests/tests/functional/cli_root/zdb/zdb_002_pos mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs/cleanup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs/setup mode=0555
+ file path=opt/zfs-tests/tests/functional/cli_root/zfs/zfs_001_neg mode=0555
+diff --git a/usr/src/test/zfs-tests/runfiles/delphix.run b/usr/src/test/zfs-tests/runfiles/delphix.run
+index e8c27d2..796a2eb 100644
+--- a/usr/src/test/zfs-tests/runfiles/delphix.run
++++ b/usr/src/test/zfs-tests/runfiles/delphix.run
+@@ -92,7 +92,7 @@ tests = [ 'clean_mirror_001_pos', 'clean_mirror_002_pos',
+     'clean_mirror_003_pos', 'clean_mirror_004_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zdb]
+-tests = ['zdb_001_neg']
++tests = ['zdb_001_neg', 'zdb_002_pos']
+ pre =
+ post =
+ 
+diff --git a/usr/src/test/zfs-tests/runfiles/omnios.run b/usr/src/test/zfs-tests/runfiles/omnios.run
+index 72f3242..8135752 100644
+--- a/usr/src/test/zfs-tests/runfiles/omnios.run
++++ b/usr/src/test/zfs-tests/runfiles/omnios.run
+@@ -92,7 +92,7 @@ tests = [ 'clean_mirror_001_pos', 'clean_mirror_002_pos',
+     'clean_mirror_003_pos', 'clean_mirror_004_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zdb]
+-tests = ['zdb_001_neg']
++tests = ['zdb_001_neg', 'zdb_002_pos']
+ pre =
+ post =
+ 
+diff --git a/usr/src/test/zfs-tests/runfiles/openindiana.run b/usr/src/test/zfs-tests/runfiles/openindiana.run
+index 5244544..2577a4e 100644
+--- a/usr/src/test/zfs-tests/runfiles/openindiana.run
++++ b/usr/src/test/zfs-tests/runfiles/openindiana.run
+@@ -92,7 +92,7 @@ tests = [ 'clean_mirror_001_pos', 'clean_mirror_002_pos',
+     'clean_mirror_003_pos', 'clean_mirror_004_pos']
+ 
+ [/opt/zfs-tests/tests/functional/cli_root/zdb]
+-tests = ['zdb_001_neg']
++tests = ['zdb_001_neg', 'zdb_002_pos']
+ pre =
+ post =
+ 
+diff --git a/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/Makefile b/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/Makefile
+index 32e23b8..f60ca24 100644
+--- a/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/Makefile
++++ b/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/Makefile
+@@ -10,7 +10,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2012 by Delphix. All rights reserved.
++# Copyright (c) 2015 by Delphix. All rights reserved.
+ #
+ 
+ include $(SRC)/Makefile.master
+@@ -18,7 +18,8 @@ include $(SRC)/Makefile.master
+ ROOTOPTPKG = $(ROOT)/opt/zfs-tests
+ TESTDIR = $(ROOTOPTPKG)/tests/functional/cli_root/zdb
+ 
+-PROGS = zdb_001_neg
++PROGS = zdb_001_neg \
++	zdb_002_pos
+ 
+ CMDS = $(PROGS:%=$(TESTDIR)/%)
+ $(CMDS) := FILEMODE = 0555
+diff --git a/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/zdb_002_pos.ksh b/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/zdb_002_pos.ksh
+new file mode 100644
+index 0000000..6d3e3ab
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/cli_root/zdb/zdb_002_pos.ksh
+@@ -0,0 +1,51 @@
++#!/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# Description:
++# zdb will accurately count the feature refcount for pools with and without
++# features enabled.
++#
++# Strategy:
++# 1. Create a pool, and collect zdb output for the pool.
++# 2. Verify there are no 'feature refcount mismatch' messages.
++# 3. Repeat for a pool with features disabled.
++#
++
++log_assert "Verify zdb accurately counts feature refcounts."
++log_onexit cleanup
++
++typeset errstr="feature refcount mismatch"
++typeset tmpfile="/var/tmp/zdb-feature-mismatch"
++function cleanup
++{
++	datasetexists $TESTPOOL && destroy_pool $TESTPOOL
++	grep "$errstr" $tmpfile
++	rm -f $tmpfile
++}
++
++for opt in '' -d; do
++	log_must zpool create -f $opt $TESTPOOL ${DISKS%% *}
++	log_must eval "zdb $TESTPOOL >$tmpfile"
++	grep -q "$errstr" $tmpfile && \
++	    log_fail "Found feature refcount mismatches in zdb output."
++	destroy_pool $TESTPOOL
++done
++
++log_pass "zdb accurately counts feature refcounts."
+-- 
+1.8.3.1
+
