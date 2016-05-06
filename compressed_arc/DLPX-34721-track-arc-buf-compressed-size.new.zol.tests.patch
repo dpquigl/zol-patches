@@ -1,0 +1,1939 @@
+From fcf1e2d38ba32ba1eeb9816aedf1c51b60b367b4 Mon Sep 17 00:00:00 2001
+From: George Wilson <george.wilson@delphix.com>
+Date: Wed, 4 May 2016 16:12:20 -0400
+Subject: [PATCH] DLPX-34721 track arc buf compressed size DLPX-37223 ARC
+ should cache compressed data DLPX-37326 arc_state_t should use refcounts to
+ track evictable space DLPX-37633 disabling compressed arc with l2arc can
+ cause a panic DLPX-37644 dmu should cache frequently used dbufs DLPX-37645
+ arc should do more data sharing DLPX-38183 Kernel heap corruption detected in
+ kmem_slab_free DLPX-38295 add verification of allocations and frees for arc
+ data buffers DLPX-38547 delphix engine hang DLPX-38547 delphix engine hang
+ (fix static global) DLPX-38882 system hung waiting on free segment DLPX-39741
+ arc_cksum_equal fails to handle gang blocks DLPX-39793 arc_stats have unused
+ kstats DLPX-39794 Stack overflow out of dbuf_rele DLPX-39860 want a way to
+ ensure that b_flags are updated in a thread safe manner DLPX-40013 memory
+ leak in dbuf_destroy() DLPX-40457 cherry pick upstream: 6220 memleak in l2arc
+ on debug build DLPX-43482 prefetched dbufs are not being cached correctly
+ DLPX-44361 l2arc_write_buffers can use stale data QA-4903 Performance
+ regression suite for zfstest QA-4904 testrunner should be able to specify
+ tests that can't timeout
+
+
+	just the tests probably won't apply
+
+---
+ pkg/manifests/system-test-zfstest.mf                                    |   25 +
+ test/test-runner/cmd/run.py                                             |   16 
+ test/zfs-tests/include/commands.cfg                                     |    9 
+ test/zfs-tests/include/default.cfg                                      |    3 
+ test/zfs-tests/include/libtest.shlib                                    |   24 +
+ test/zfs-tests/runfiles/Makefile                                        |    5 
+ test/zfs-tests/runfiles/perf-regression.run                             |   30 +
+ test/zfs-tests/tests/Makefile                                           |    4 
+ test/zfs-tests/tests/functional/clean_mirror/clean_mirror_common.kshlib |   36 +
+ test/zfs-tests/tests/perf/Makefile                                      |   44 +
+ test/zfs-tests/tests/perf/fio/Makefile                                  |   41 +
+ test/zfs-tests/tests/perf/fio/mkfiles.fio                               |   30 +
+ test/zfs-tests/tests/perf/fio/random_reads.fio                          |   31 +
+ test/zfs-tests/tests/perf/fio/random_readwrite.fio                      |   35 +
+ test/zfs-tests/tests/perf/fio/random_writes.fio                         |   33 +
+ test/zfs-tests/tests/perf/fio/sequential_reads.fio                      |   31 +
+ test/zfs-tests/tests/perf/fio/sequential_writes.fio                     |   33 +
+ test/zfs-tests/tests/perf/perf.shlib                                    |  240 ++++++++++
+ test/zfs-tests/tests/perf/regression/Makefile                           |   46 +
+ test/zfs-tests/tests/perf/regression/random_reads.ksh                   |   77 +++
+ test/zfs-tests/tests/perf/regression/random_readwrite.ksh               |   77 +++
+ test/zfs-tests/tests/perf/regression/random_writes.ksh                  |   69 ++
+ test/zfs-tests/tests/perf/regression/sequential_reads.ksh               |   78 +++
+ test/zfs-tests/tests/perf/regression/sequential_reads_cached.ksh        |   77 +++
+ test/zfs-tests/tests/perf/regression/sequential_reads_cached_clone.ksh  |   93 +++
+ test/zfs-tests/tests/perf/regression/sequential_writes.ksh              |   69 ++
+ test/zfs-tests/tests/perf/regression/setup.ksh                          |   23 
+ test/zfs-tests/tests/perf/scripts/Makefile                              |   37 +
+ test/zfs-tests/tests/perf/scripts/io.d                                  |  109 ++++
+ test/zfs-tests/tests/perf/scripts/prefetch_io.d                         |   87 +++
+ 30 files changed, 1504 insertions(+), 8 deletions(-)
+
+ create mode 100644 usr/src/test/zfs-tests/runfiles/perf-regression.run
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/mkfiles.fio
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/random_reads.fio
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/random_readwrite.fio
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/random_writes.fio
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/sequential_reads.fio
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/fio/sequential_writes.fio
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/perf.shlib
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/random_reads.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/random_readwrite.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/random_writes.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/sequential_reads.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached_clone.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/sequential_writes.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/regression/setup.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/scripts/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/scripts/io.d
+ create mode 100644 usr/src/test/zfs-tests/tests/perf/scripts/prefetch_io.d
+
+diff --git a/usr/src/pkg/manifests/system-test-zfstest.mf b/usr/src/pkg/manifests/system-test-zfstest.mf
+index 9516cd0..4ea9b22 100644
+--- a/usr/src/pkg/manifests/system-test-zfstest.mf
++++ b/usr/src/pkg/manifests/system-test-zfstest.mf
+@@ -143,6 +143,10 @@ dir path=opt/zfs-tests/tests/functional/zvol/zvol_ENOSPC
+ dir path=opt/zfs-tests/tests/functional/zvol/zvol_cli
+ dir path=opt/zfs-tests/tests/functional/zvol/zvol_misc
+ dir path=opt/zfs-tests/tests/functional/zvol/zvol_swap
++dir path=opt/zfs-tests/tests/perf
++dir path=opt/zfs-tests/tests/perf/fio
++dir path=opt/zfs-tests/tests/perf/regression
++dir path=opt/zfs-tests/tests/perf/scripts
+ file path=opt/zfs-tests/README mode=0444
+ file path=opt/zfs-tests/bin/chg_usr_exec mode=0555
+ file path=opt/zfs-tests/bin/devname2devid mode=0555
+@@ -170,6 +174,7 @@ file path=opt/zfs-tests/include/properties.shlib mode=0555
+ file path=opt/zfs-tests/runfiles/delphix.run mode=0444
+ file path=opt/zfs-tests/runfiles/omnios.run mode=0444
+ file path=opt/zfs-tests/runfiles/openindiana.run mode=0444
++file path=opt/zfs-tests/runfiles/perf-regression.run mode=0444
+ file path=opt/zfs-tests/tests/functional/acl/acl.cfg mode=0555
+ file path=opt/zfs-tests/tests/functional/acl/acl_common.kshlib mode=0555
+ file path=opt/zfs-tests/tests/functional/acl/cifs/cifs.kshlib mode=0555
+@@ -2247,8 +2252,28 @@ file path=opt/zfs-tests/tests/functional/zvol/zvol_swap/zvol_swap_005_pos \
+     mode=0555
+ file path=opt/zfs-tests/tests/functional/zvol/zvol_swap/zvol_swap_006_pos \
+     mode=0555
++file path=opt/zfs-tests/tests/perf/fio/mkfiles.fio mode=0444
++file path=opt/zfs-tests/tests/perf/fio/random_reads.fio mode=0444
++file path=opt/zfs-tests/tests/perf/fio/random_readwrite.fio mode=0444
++file path=opt/zfs-tests/tests/perf/fio/random_writes.fio mode=0444
++file path=opt/zfs-tests/tests/perf/fio/sequential_reads.fio mode=0444
++file path=opt/zfs-tests/tests/perf/fio/sequential_writes.fio mode=0444
++file path=opt/zfs-tests/tests/perf/perf.shlib mode=0555
++file path=opt/zfs-tests/tests/perf/regression/random_reads mode=0555
++file path=opt/zfs-tests/tests/perf/regression/random_readwrite mode=0555
++file path=opt/zfs-tests/tests/perf/regression/random_writes mode=0555
++file path=opt/zfs-tests/tests/perf/regression/sequential_reads mode=0555
++file path=opt/zfs-tests/tests/perf/regression/sequential_reads_cached \
++    mode=0555
++file path=opt/zfs-tests/tests/perf/regression/sequential_reads_cached_clone \
++    mode=0555
++file path=opt/zfs-tests/tests/perf/regression/sequential_writes mode=0555
++file path=opt/zfs-tests/tests/perf/regression/setup mode=0555
++file path=opt/zfs-tests/tests/perf/scripts/io.d mode=0555
++file path=opt/zfs-tests/tests/perf/scripts/prefetch_io.d mode=0555
+ license cr_Sun license=cr_Sun
+ license lic_CDDL license=lic_CDDL
++#depend fmri=benchmark/fio type=require
+ depend fmri=system/file-system/zfs/tests type=require
+ depend fmri=system/test/testrunner type=require
+ depend fmri=system/xopen/xcu4 type=require
+diff --git a/usr/src/test/test-runner/cmd/run.py b/usr/src/test/test-runner/cmd/run.py
+index 44bb9a3..65a04a2 100644
+--- a/usr/src/test/test-runner/cmd/run.py
++++ b/usr/src/test/test-runner/cmd/run.py
+@@ -27,6 +27,7 @@ from select import select
+ from subprocess import PIPE
+ from subprocess import Popen
+ from sys import argv
++from sys import maxint
+ from sys import exit
+ from threading import Timer
+ from time import time
+@@ -144,13 +145,16 @@ class Cmd(object):
+     def __init__(self, pathname, outputdir=None, timeout=None, user=None):
+         self.pathname = pathname
+         self.outputdir = outputdir or 'BASEDIR'
+-        self.timeout = timeout or 60
++        self.timeout = timeout
+         self.user = user or ''
+         self.killed = False
+         self.result = Result()
+ 
++        if self.timeout == None:
++            self.timeout = 60
++
+     def __str__(self):
+-        return "Pathname: %s\nOutputdir: %s\nTimeout: %s\nUser: %s\n" % (
++        return "Pathname: %s\nOutputdir: %s\nTimeout: %d\nUser: %s\n" % (
+                 self.pathname, self.outputdir, self.timeout, self.user)
+ 
+     def kill_cmd(self, proc):
+@@ -227,6 +231,10 @@ class Cmd(object):
+         try:
+             self.result.starttime = time()
+             proc = Popen(privcmd, stdout=PIPE, stderr=PIPE)
++
++            # Allow a special timeout value of 0 to mean infinity
++            if int(self.timeout) == 0:
++                self.timeout = maxint
+             t = Timer(int(self.timeout), self.kill_cmd, [proc])
+             t.start()
+             self.result.stdout, self.result.stderr = self.collect_output(proc)
+@@ -315,7 +323,7 @@ class Test(Cmd):
+             pre_user = ' (as %s)' % (self.pre_user)
+         if len(self.post_user):
+             post_user = ' (as %s)' % (self.post_user)
+-        return "Pathname: %s\nOutputdir: %s\nTimeout: %s\nPre: %s%s\nPost: " \
++        return "Pathname: %s\nOutputdir: %s\nTimeout: %d\nPre: %s%s\nPost: " \
+                "%s%s\nUser: %s\n" % (self.pathname, self.outputdir,
+                 self.timeout, self.pre, pre_user, self.post, post_user,
+                 self.user)
+@@ -390,7 +398,7 @@ class TestGroup(Test):
+             pre_user = ' (as %s)' % (self.pre_user)
+         if len(self.post_user):
+             post_user = ' (as %s)' % (self.post_user)
+-        return "Pathname: %s\nOutputdir: %s\nTests: %s\nTimeout: %s\n" \
++        return "Pathname: %s\nOutputdir: %s\nTests: %s\nTimeout: %d\n" \
+                "Pre: %s%s\nPost: %s%s\nUser: %s\n" % (self.pathname,
+                 self.outputdir, self.tests, self.timeout, self.pre, pre_user,
+                 self.post, post_user, self.user)
+diff --git a/usr/src/test/zfs-tests/include/commands.cfg b/usr/src/test/zfs-tests/include/commands.cfg
+index c65cafb..33a6fe2 100644
+--- a/usr/src/test/zfs-tests/include/commands.cfg
++++ b/usr/src/test/zfs-tests/include/commands.cfg
+@@ -41,17 +41,20 @@ export DF="/usr/bin/df"
+ export DIFF="/usr/bin/diff"
+ export DIRCMP="/usr/bin/dircmp"
+ export DIRNAME="/usr/bin/dirname"
++export DTRACE="/usr/sbin/dtrace"
+ export DU="/usr/bin/du"
+ export DUMPADM="/usr/sbin/dumpadm"
+ export ECHO="/usr/bin/echo"
+ export EGREP="/usr/bin/egrep"
+ # Don't use $ENV here, because in ksh scripts it evaluates to
+ # $HOME/.kshrc - likely not what you wanted.
++export FALSE="/usr/bin/false"
+ export FDISK="/usr/sbin/fdisk"
+ export FF="/usr/sbin/ff"
+ export FGREP="/usr/bin/fgrep"
+ export FILE="/usr/bin/file"
+ export FIND="/usr/bin/find"
++export FIO="/usr/bin/fio"
+ export FMADM="/usr/sbin/fmadm"
+ export FMDUMP="/usr/sbin/fmdump"
+ export FORMAT="/usr/sbin/format"
+@@ -70,6 +73,7 @@ export GROUPS="/usr/bin/groups"
+ export HEAD="/usr/bin/head"
+ export HOSTNAME="/usr/bin/hostname"
+ export ID="/usr/bin/id"
++export IOSTAT="/usr/bin/iostat"
+ export ISAINFO="/usr/bin/isainfo"
+ export KILL="/usr/bin/kill"
+ export KSH="/usr/bin/ksh"
+@@ -88,6 +92,7 @@ export MKNOD="/usr/sbin/mknod"
+ export MODINFO="/usr/sbin/modinfo"
+ export MODUNLOAD="/usr/sbin/modunload"
+ export MOUNT="/usr/sbin/mount"
++export MPSTAT="/usr/bin/mpstat"
+ export MV="/usr/bin/mv"
+ export NAWK="/usr/bin/nawk"
+ export NCHECK="/usr/sbin/ncheck"
+@@ -108,6 +113,7 @@ export PSRINFO="/usr/sbin/psrinfo"
+ export PWD="/usr/bin/pwd"
+ export PYTHON="/usr/bin/python"
+ export QUOTAON="/usr/sbin/quotaon"
++export READLINK="/usr/bin/readlink"
+ export RCP="/usr/bin/rcp"
+ export REBOOT="/usr/sbin/reboot"
+ export RM="/usr/bin/rm"
+@@ -130,6 +136,7 @@ export SWAPADD="/sbin/swapadd"
+ export SYNC="/usr/bin/sync"
+ export TAIL="/usr/bin/tail"
+ export TAR="/usr/sbin/tar"
++export TIMEOUT="/usr/bin/timeout"
+ export TOUCH="/usr/bin/touch"
+ export TR="/usr/bin/tr"
+ export TRUNCATE="/usr/bin/truncate"
+@@ -148,11 +155,13 @@ export UNSHARE="/usr/sbin/unshare"
+ export USERADD="/usr/sbin/useradd"
+ export USERDEL="/usr/sbin/userdel"
+ export USERMOD="/usr/sbin/usermod"
++export VMSTAT="/usr/bin/vmstat"
+ export WAIT="/usr/bin/wait"
+ export WC="/usr/bin/wc"
+ export ZDB="/usr/sbin/zdb"
+ export ZFS="/usr/sbin/zfs"
+ export ZHACK="/usr/sbin/zhack"
++export ZINJECT="/usr/sbin/zinject"
+ export ZLOGIN="/usr/sbin/zlogin"
+ export ZLOOK="/usr/bin/zlook"
+ export ZONEADM="/usr/sbin/zoneadm"
+diff --git a/usr/src/test/zfs-tests/include/default.cfg b/usr/src/test/zfs-tests/include/default.cfg
+index 61fb25e..faa1c10 100644
+--- a/usr/src/test/zfs-tests/include/default.cfg
++++ b/usr/src/test/zfs-tests/include/default.cfg
+@@ -81,12 +81,15 @@ export COMPRESSION_PROP=on
+ export CHECKSUM_PROP=on
+ 
+ # some common variables used by test scripts :
++export FIO_SCRIPTS=$STF_SUITE/tests/perf/fio
++export PERF_SCRIPTS=$STF_SUITE/tests/perf/scripts
+ 
+ # some test pool names
+ export TESTPOOL=testpool.$$
+ export TESTPOOL1=testpool1.$$
+ export TESTPOOL2=testpool2.$$
+ export TESTPOOL3=testpool3.$$
++export PERFPOOL=perfpool
+ 
+ # some test file system names
+ export TESTFS=testfs.$$
+diff --git a/usr/src/test/zfs-tests/include/libtest.shlib b/usr/src/test/zfs-tests/include/libtest.shlib
+index 30f10fc..ded6ae4 100644
+--- a/usr/src/test/zfs-tests/include/libtest.shlib
++++ b/usr/src/test/zfs-tests/include/libtest.shlib
+@@ -2446,3 +2446,27 @@ function vdevs_in_pool
+ 
+ 	return 0;
+ }
++
++function get_max
++{
++	typeset -l i max=$1
++	shift
++
++	for i in "$@"; do
++		max=$(echo $((max > i ? max : i)))
++	done
++
++	echo $max
++}
++
++function get_min
++{
++	typeset -l i min=$1
++	shift
++
++	for i in "$@"; do
++		min=$(echo $((min < i ? min : i)))
++	done
++
++	echo $min
++}
+diff --git a/usr/src/test/zfs-tests/runfiles/Makefile b/usr/src/test/zfs-tests/runfiles/Makefile
+index 0721285..039a0ca 100644
+--- a/usr/src/test/zfs-tests/runfiles/Makefile
++++ b/usr/src/test/zfs-tests/runfiles/Makefile
+@@ -16,7 +16,10 @@
+ 
+ include $(SRC)/Makefile.master
+ 
+-SRCS = delphix.run openindiana.run omnios.run
++SRCS = delphix.run \
++	openindiana.run \
++	omnios.run \
++	perf-regression.run
+ 
+ ROOTOPTPKG = $(ROOT)/opt/zfs-tests
+ RUNFILES = $(ROOTOPTPKG)/runfiles
+diff --git a/usr/src/test/zfs-tests/runfiles/perf-regression.run b/usr/src/test/zfs-tests/runfiles/perf-regression.run
+new file mode 100644
+index 0000000..fd90b9d
+--- /dev/null
++++ b/usr/src/test/zfs-tests/runfiles/perf-regression.run
+@@ -0,0 +1,30 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[DEFAULT]
++pre = setup
++quiet = False
++pre_user = root
++user = root
++timeout = 0
++post_user = root
++post = cleanup
++outputdir = /var/tmp/test_results
++
++[/opt/zfs-tests/tests/perf/regression]
++tests = ['sequential_writes', 'sequential_reads', 'sequential_reads_cached',
++    'sequential_reads_cached_clone, 'random_reads', 'random_writes',
++    'random_readwrite']
++post =
+diff --git a/usr/src/test/zfs-tests/tests/Makefile b/usr/src/test/zfs-tests/tests/Makefile
+index 5502e74..0f569c9 100644
+--- a/usr/src/test/zfs-tests/tests/Makefile
++++ b/usr/src/test/zfs-tests/tests/Makefile
+@@ -10,11 +10,11 @@
+ #
+ 
+ #
+-# Copyright (c) 2012 by Delphix. All rights reserved.
++# Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ #
+ 
+ .PARALLEL: $(SUBDIRS)
+ 
+-SUBDIRS = functional stress
++SUBDIRS = functional perf
+ 
+ include $(SRC)/test/Makefile.com
+diff --git a/usr/src/test/zfs-tests/tests/functional/clean_mirror/clean_mirror_common.kshlib b/usr/src/test/zfs-tests/tests/functional/clean_mirror/clean_mirror_common.kshlib
+index 3fd6c02..91a6d13 100644
+--- a/usr/src/test/zfs-tests/tests/functional/clean_mirror/clean_mirror_common.kshlib
++++ b/usr/src/test/zfs-tests/tests/functional/clean_mirror/clean_mirror_common.kshlib
+@@ -25,7 +25,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2013 by Delphix. All rights reserved.
++# Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+ #
+ 
+ . $STF_SUITE/tests/functional/clean_mirror/default.cfg
+@@ -36,6 +36,32 @@
+ # the contents of the mirror.
+ # This code is sourced into each of these test cases.
+ 
++#
++# Synchronize all the data in pool
++#
++# $1 pool name
++#
++function sync_pool #pool
++{
++	typeset pool=$1
++
++	log_must $SYNC
++	log_must $SLEEP 2
++	# Flush all the pool data.
++	typeset -i ret
++	$ZPOOL scrub $pool >/dev/null 2>&1
++	ret=$?
++	(( $ret != 0 )) && \
++		log_fail "$ZPOOL scrub $pool failed."
++
++	while ! is_pool_scrubbed $pool; do
++		if is_pool_resilvered $pool ; then
++			log_fail "$pool should not be resilver completed."
++		fi
++		log_must $SLEEP 2
++	done
++}
++
+ function overwrite_verify_mirror
+ {
+ 	typeset AFFECTED_DEVICE=$1
+@@ -60,6 +86,12 @@ function overwrite_verify_mirror
+ 
+ 	atfile=0
+ 
++	#
++	# Flush out the cache so that we ensure we're reading from disk.
++	#
++	log_must $ZPOOL export $TESTPOOL
++	log_must $ZPOOL import $TESTPOOL
++
+ 	typeset -i failedcount=0
+ 	while (( atfile < FILE_COUNT )); do
+ 		files[$atfile]=$TESTDIR/file.$atfile
+@@ -75,4 +107,6 @@ function overwrite_verify_mirror
+ 		log_fail "of the $FILE_COUNT files $failedcount did not " \
+ 		    "have the same checksum before and after."
+ 	fi
++
++	sync_pool $TESTPOOL
+ }
+diff --git a/usr/src/test/zfs-tests/tests/perf/Makefile b/usr/src/test/zfs-tests/tests/perf/Makefile
+new file mode 100644
+index 0000000..7886eab
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/Makefile
+@@ -0,0 +1,44 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++.PARALLEL: $(SUBDIRS)
++
++include $(SRC)/Makefile.master
++
++ROOTOPTPKG = $(ROOT)/opt/zfs-tests
++TESTDIR = $(ROOTOPTPKG)/tests/perf
++
++PROGS = perf.shlib
++
++CMDS = $(PROGS:%=$(TESTDIR)/%)
++$(CMDS) := FILEMODE = 0555
++
++all lint clean clobber:
++
++install: $(CMDS)
++
++$(CMDS): $(TESTDIR)
++
++$(TESTDIR):
++	$(INS.dir)
++
++$(TESTDIR)/%: %
++	$(INS.file)
++
++SUBDIRS = fio \
++	regression \
++	scripts
++
++include $(SRC)/test/Makefile.com
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/Makefile b/usr/src/test/zfs-tests/tests/perf/fio/Makefile
+new file mode 100644
+index 0000000..012e286
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/Makefile
+@@ -0,0 +1,41 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/Makefile.master
++
++ROOTOPTPKG = $(ROOT)/opt/zfs-tests
++TESTDIR = $(ROOTOPTPKG)/tests/perf/fio
++
++FILES = mkfiles.fio \
++	random_reads.fio \
++	random_readwrite.fio \
++	random_writes.fio \
++	sequential_reads.fio \
++	sequential_writes.fio
++
++CMDS = $(FILES:%=$(TESTDIR)/%)
++$(CMDS) := FILEMODE = 0444
++
++all lint clean clobber:
++
++install: $(CMDS)
++
++$(CMDS): $(TESTDIR)
++
++$(TESTDIR):
++	$(INS.dir)
++
++$(TESTDIR)/%: %
++	$(INS.file)
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/mkfiles.fio b/usr/src/test/zfs-tests/tests/perf/fio/mkfiles.fio
+new file mode 100644
+index 0000000..f876bd6
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/mkfiles.fio
+@@ -0,0 +1,30 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[global]
++filename_format=file$jobnum
++group_reporting=1
++fallocate=0
++ioengine=psync
++bs=1024k
++rw=write
++thread=1
++directory=/${TESTFS}
++numjobs=${NUMJOBS}
++filesize=${FILE_SIZE}
++buffer_compress_percentage=33
++buffer_compress_chunk=4096
++
++[job]
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/random_reads.fio b/usr/src/test/zfs-tests/tests/perf/fio/random_reads.fio
+new file mode 100644
+index 0000000..25dd2ff
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/random_reads.fio
+@@ -0,0 +1,31 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[global]
++filename_format=file$jobnum
++group_reporting=1
++fallocate=0
++overwrite=0
++thread=1
++rw=randread
++time_based=1
++directory=/${TESTFS}
++runtime=${RUNTIME}
++bs=${BLOCKSIZE}
++ioengine=psync
++sync=${SYNC_TYPE}
++numjobs=${NUMJOBS}
++
++[job]
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/random_readwrite.fio b/usr/src/test/zfs-tests/tests/perf/fio/random_readwrite.fio
+new file mode 100644
+index 0000000..0b75026
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/random_readwrite.fio
+@@ -0,0 +1,35 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[global]
++filename_format=file$jobnum
++nrfiles=16
++group_reporting=1
++fallocate=0
++overwrite=0
++thread=1
++rw=randrw
++rwmixread=80
++time_based=1
++directory=/${TESTFS}
++runtime=${RUNTIME}
++bssplit=4k/50:8k/30:128k/10:1m/10
++ioengine=psync
++sync=${SYNC_TYPE}
++numjobs=${NUMJOBS}
++buffer_compress_percentage=33
++buffer_compress_chunk=4096
++
++[job]
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/random_writes.fio b/usr/src/test/zfs-tests/tests/perf/fio/random_writes.fio
+new file mode 100644
+index 0000000..b1860a7
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/random_writes.fio
+@@ -0,0 +1,33 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[global]
++filename_format=file$jobnum
++group_reporting=1
++fallocate=0
++thread=1
++rw=randwrite
++time_based=1
++directory=/${TESTFS}
++runtime=${RUNTIME}
++bs=${BLOCKSIZE}
++ioengine=psync
++sync=${SYNC_TYPE}
++numjobs=${NUMJOBS}
++filesize=${FILESIZE}
++buffer_compress_percentage=33
++buffer_compress_chunk=4096
++
++[job]
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/sequential_reads.fio b/usr/src/test/zfs-tests/tests/perf/fio/sequential_reads.fio
+new file mode 100644
+index 0000000..b7d9fea
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/sequential_reads.fio
+@@ -0,0 +1,31 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[global]
++filename_format=file$jobnum
++group_reporting=1
++fallocate=0
++overwrite=0
++thread=1
++rw=read
++time_based=1
++directory=/${TESTFS}
++runtime=${RUNTIME}
++bs=${BLOCKSIZE}
++ioengine=psync
++sync=${SYNC_TYPE}
++numjobs=${NUMJOBS}
++
++[job]
+diff --git a/usr/src/test/zfs-tests/tests/perf/fio/sequential_writes.fio b/usr/src/test/zfs-tests/tests/perf/fio/sequential_writes.fio
+new file mode 100644
+index 0000000..df1590c
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/fio/sequential_writes.fio
+@@ -0,0 +1,33 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++[global]
++filename_format=file$jobnum
++group_reporting=1
++fallocate=0
++thread=1
++rw=write
++time_based=1
++directory=/${TESTFS}
++runtime=${RUNTIME}
++bs=${BLOCKSIZE}
++ioengine=psync
++sync=${SYNC_TYPE}
++numjobs=${NUMJOBS}
++filesize=${FILESIZE}
++buffer_compress_percentage=33
++buffer_compress_chunk=4096
++
++[job]
+diff --git a/usr/src/test/zfs-tests/tests/perf/perf.shlib b/usr/src/test/zfs-tests/tests/perf/perf.shlib
+new file mode 100644
+index 0000000..2b4d043
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/perf.shlib
+@@ -0,0 +1,240 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++# If neither is specified, do a nightly run.
++[[ -z $PERF_REGRESSION_WEEKLY ]] && export PERF_REGRESSION_NIGHTLY=1
++
++# Default runtime for each type of test run.
++export PERF_RUNTIME_WEEKLY=$((30 * 60))
++export PERF_RUNTIME_NIGHTLY=$((10 * 60))
++
++# Default fs creation options
++export PERF_FS_OPTS=${PERF_FS_OPTS:-'-o recsize=8k -o compress=lz4' \
++    ' -o checksum=sha256 -o redundant_metadata=most'}
++
++function get_sync_str
++{
++	typeset sync=$1
++	typeset sync_str=''
++
++	[[ $sync -eq 0 ]] && sync_str='async'
++	[[ $sync -eq 1 ]] && sync_str='sync'
++	echo $sync_str
++}
++
++#
++# This function will run fio in a loop, according to the .fio file passed
++# in and a number of environment variables. The following variables can be
++# set before launching zfstest to override the defaults.
++#
++# PERF_RUNTIME: The time in seconds each fio invocation should run.
++# PERF_RUNTYPE: A human readable tag that appears in logs. The defaults are
++#    nightly and weekly.
++# PERF_NTHREADS: A list of how many threads each fio invocation will use.
++# PERF_SYNC_TYPES: Whether to use (O_SYNC) or not. 1 is sync IO, 0 is async IO.
++# PERF_IOSIZES: A list of blocksizes in which each fio invocation will do IO.
++# PERF_COLLECT_SCRIPTS: A comma delimited list of 'command args, logfile_tag'
++#    pairs that will be added to the scripts specified in each test.
++#
++function do_fio_run
++{
++	typeset script=$1
++	typeset do_recreate=$2
++	typeset clear_cache=$3
++	typeset threads sync iosize
++
++	for threads in $PERF_NTHREADS; do
++		for sync in $PERF_SYNC_TYPES; do
++			for iosize in $PERF_IOSIZES; do
++				log_note "Running with $threads" \
++				    "$(get_sync_str $sync) threads, $iosize ios"
++
++				if $do_recreate; then
++					recreate_perfpool
++					log_must $ZFS create $PERF_FS_OPTS \
++					    $TESTFS
++				fi
++
++				if $clear_cache; then
++					# Clear the ARC
++					$ZPOOL export $PERFPOOL
++					$ZPOOL import $PERFPOOL
++				fi
++
++				export RUNTIME=$PERF_RUNTIME
++				export FILESIZE=$((TOTAL_SIZE / threads))
++				export NUMJOBS=$threads
++				export SYNC_TYPE=$sync
++				export BLOCKSIZE=$iosize
++				$SYNC
++
++				# Start the data collection
++				do_collect_scripts $threads $sync $iosize
++
++				# Start the load
++				log_must $FIO $FIO_SCRIPTS/$script
++			done
++		done
++	done
++}
++
++#
++# This function iterates through the value pairs in $PERF_COLLECT_SCRIPTS.
++# The script at index N is launched in the background, with its output
++# redirected to a logfile containing the tag specified at index N + 1.
++#
++function do_collect_scripts
++{
++	typeset threads=$1
++	typeset sync=$2
++	typeset iosize=$3
++
++	[[ -n $collect_scripts ]] || log_fail "No data collection scripts."
++	[[ -n $PERF_RUNTIME ]] || log_fail "No runtime specified."
++
++	# This will be part of the output filename.
++	typeset sync_str=$(get_sync_str $sync)
++	typeset suffix="$sync_str.$iosize-ios.$threads-threads"
++
++	# Add in user supplied scripts and logfiles, if any.
++	typeset oIFS=$IFS
++	IFS=','
++	for item in $PERF_COLLECT_SCRIPTS; do
++		collect_scripts+=($($ECHO $item | $SED 's/^ *//g'))
++	done
++	IFS=$oIFS
++
++	typeset idx=0
++	while [[ $idx -lt "${#collect_scripts[@]}" ]]; do
++		typeset logbase="$(get_perf_output_dir)/$($BASENAME \
++		    $SUDO_COMMAND)"
++		typeset outfile="$logbase.${collect_scripts[$idx + 1]}.$suffix"
++
++		$TIMEOUT $PERF_RUNTIME ${collect_scripts[$idx]} >$outfile 2>&1 &
++		((idx += 2))
++	done
++
++	# Need to explicitly return 0 because timeout(1) will kill
++	# a child process and cause us to return non-zero.
++	return 0
++}
++
++# Find a place to deposit performance data collected while under load.
++function get_perf_output_dir
++{
++	typeset dir="$(pwd)/perf_data"
++	[[ -d $dir ]] || $MKDIR -p $dir
++
++	$ECHO $dir
++}
++
++#
++# Destroy and create the pool used for performance tests. The
++# PERFPOOL_CREATE_CMD variable allows users to test with a custom pool
++# configuration by specifying the pool creation command in their environment.
++# If PERFPOOL_CREATE_CMD is empty, a pool using all available disks is created.
++#
++function recreate_perfpool
++{
++	[[ -n $PERFPOOL ]] || log_fail "The \$PERFPOOL variable isn't set."
++
++	poolexists $PERFPOOL && destroy_pool $PERFPOOL
++
++	if [[ -n $PERFPOOL_CREATE_CMD ]]; then
++		log_must $PERFPOOL_CREATE_CMD
++	else
++		log_must eval "$ZPOOL create -f $PERFPOOL $DISKS"
++	fi
++}
++
++function get_max_arc_size
++{
++	typeset -l max_arc_size=$(dtrace -qn 'BEGIN {
++	    printf("%u\n", `arc_stats.arcstat_c_max.value.ui64);
++	    exit(0);
++	}')
++
++	[[ $? -eq 0 ]] || log_fail "get_max_arc_size failed"
++
++	echo $max_arc_size
++}
++
++# Create a file with some information about how this system is configured.
++function get_system_config
++{
++	typeset config=$PERF_DATA_DIR/$1
++
++	echo "{" >>$config
++	$DTRACE -qn 'BEGIN{
++	    printf("  \"ncpus\": %d,\n", `ncpus);
++	    printf("  \"physmem\": %u,\n", `physmem * `_pagesize);
++	    printf("  \"c_max\": %u,\n", `arc_stats.arcstat_c_max.value.ui64);
++	    printf("  \"kmem_flags\": \"0x%x\",", `kmem_flags);
++	    exit(0)}' >>$config
++	$ECHO "  \"hostname\": \"$($UNAME -n)\"," >>$config
++	$ECHO "  \"kernel version\": \"$($UNAME -v)\"," >>$config
++	$IOSTAT -En | $AWK 'BEGIN {
++	    printf("  \"disks\": {\n"); first = 1}
++	    /^c/ {disk = $1}
++	    /^Size: [^0]/ {size = $2;
++	    if (first != 1) {printf(",\n")} else {first = 0}
++	    printf("    \"%s\": \"%s\"", disk, size)}
++	    END {printf("\n  },\n")}' >>$config
++	$SED -n 's/^set \(.*\)[ ]=[ ]\(.*\)/\1=\2/p' /etc/system | \
++	    $AWK -F= 'BEGIN {printf("  \"system\": {\n"); first = 1}
++	    {if (first != 1) {printf(",\n")} else {first = 0};
++	    printf("    \"%s\": %s", $1, $2)}
++	    END {printf("\n  }\n")}' >>$config
++	echo "}" >>$config
++}
++
++function num_jobs_by_cpu
++{
++	typeset ncpu=$($PSRINFO | $WC -l)
++	typeset num_jobs=$ncpu
++
++	[[ $ncpu -gt 8 ]] && num_jobs=$($ECHO "$ncpu * 3 / 4" | $BC)
++
++	$ECHO $num_jobs
++}
++
++function pool_to_lun_list
++{
++	typeset pool=$1
++	typeset ctd ctds devname lun
++	typeset lun_list=':'
++
++	ctds=$($ZPOOL list -v $pool | $AWK '/c[0-9]*t[0-9a-fA-F]*d[0-9]*/ \
++	    {print $1}')
++
++	for ctd in $ctds; do
++		# Get the device name as it appears in /etc/path_to_inst
++		devname=$($READLINK -f /dev/dsk/${ctd}s0 | $SED -n \
++		    's/\/devices\([^:]*\):.*/\1/p')
++		# Add a string composed of the driver name and instance
++		# number to the list for comparison with dev_statname.
++		lun=$($SED 's/"//g' /etc/path_to_inst | $GREP $devname | $AWK \
++		    '{print $3$2}')
++		lun_list="$lun_list$lun:"
++	done
++	echo $lun_list
++}
++
++# Create a perf_data directory to hold performance statistics and
++# configuration information.
++export PERF_DATA_DIR=$(get_perf_output_dir)
++[[ -f $PERF_DATA_DIR/config.json ]] || get_system_config config.json
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/Makefile b/usr/src/test/zfs-tests/tests/perf/regression/Makefile
+new file mode 100644
+index 0000000..1b4aa2b
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/Makefile
+@@ -0,0 +1,46 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/Makefile.master
++
++ROOTOPTPKG = $(ROOT)/opt/zfs-tests
++TESTDIR = $(ROOTOPTPKG)/tests/perf/regression
++
++PROGS = random_reads \
++	random_readwrite \
++	random_writes \
++	sequential_reads \
++	sequential_reads_cached \
++	sequential_reads_cached_clone \
++	sequential_writes \
++	setup
++
++CMDS = $(PROGS:%=$(TESTDIR)/%)
++$(CMDS) := FILEMODE = 0555
++
++all lint clean clobber:
++
++install: $(CMDS)
++
++$(CMDS): $(TESTDIR)
++
++$(TESTDIR):
++	$(INS.dir)
++
++$(TESTDIR)/%: %.ksh
++	$(INS.rename)
++
++$(TESTDIR)/%: %
++	$(INS.file)
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/random_reads.ksh b/usr/src/test/zfs-tests/tests/perf/regression/random_reads.ksh
+new file mode 100644
+index 0000000..2395b89
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/random_reads.ksh
+@@ -0,0 +1,77 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the random_reads job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# The files to read from are created prior to the first fio run, and used
++# for all fio runs. The ARC is cleared with `zinject -a` prior to each run
++# so reads will go to disk.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++log_assert "Measure IO stats during random read load"
++log_onexit cleanup
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
++export TOTAL_SIZE=$(($(get_prop avail $TESTFS) * 3 / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'8 16 64'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
++fi
++
++# Layout the files to be used by the read tests. Create as many files as the
++# largest number of threads. An fio run with fewer threads will use a subset
++# of the available files.
++export NUMJOBS=$(get_max $PERF_NTHREADS)
++export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
++log_must $FIO $FIO_SCRIPTS/mkfiles.fio
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$VMSTAT 1" "vmstat" "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Random reads with $PERF_RUNTYPE settings"
++do_fio_run random_reads.fio $FALSE $TRUE
++log_pass "Measure IO stats during random read load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/random_readwrite.ksh b/usr/src/test/zfs-tests/tests/perf/regression/random_readwrite.ksh
+new file mode 100644
+index 0000000..be87e43
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/random_readwrite.ksh
+@@ -0,0 +1,77 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the random_readwrite job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# The files to read and write from are created prior to the first fio run,
++# and used for all fio runs. The ARC is cleared with `zinject -a` prior to
++# each run so reads will go to disk.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++log_assert "Measure IO stats during random read-write load"
++log_onexit cleanup
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
++export TOTAL_SIZE=$(($(get_prop avail $TESTFS) * 3 / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'8 16 64'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'0 1'}
++	export PERF_IOSIZES=''		# bssplit used instead
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=''		# bssplit used instead
++fi
++
++# Layout the files to be used by the readwrite tests. Create as many files
++# as the largest number of threads. An fio run with fewer threads will use
++# a subset of the available files.
++export NUMJOBS=$(get_max $PERF_NTHREADS)
++export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
++log_must $FIO $FIO_SCRIPTS/mkfiles.fio
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$VMSTAT 1" "vmstat" "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Random reads and writes with $PERF_RUNTYPE settings"
++do_fio_run random_readwrite.fio $FALSE $TRUE
++log_pass "Measure IO stats during random read and write load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/random_writes.ksh b/usr/src/test/zfs-tests/tests/perf/regression/random_writes.ksh
+new file mode 100644
+index 0000000..a4469c3
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/random_writes.ksh
+@@ -0,0 +1,69 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the random_writes job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# Prior to each fio run the dataset is recreated, and fio writes new files
++# into an otherwise empty pool.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++log_assert "Measure IO stats during random write load"
++log_onexit cleanup
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
++export TOTAL_SIZE=$(($(get_prop avail $TESTFS) * 3 / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'8 16 64'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'0 1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
++fi
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$VMSTAT 1" "vmstat" "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Random writes with $PERF_RUNTYPE settings"
++do_fio_run random_writes.fio $TRUE $FALSE
++log_pass "Measure IO stats during random write load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads.ksh b/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads.ksh
+new file mode 100644
+index 0000000..b04d06c
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads.ksh
+@@ -0,0 +1,78 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the sequential_reads job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# The files to read from are created prior to the first fio run, and used
++# for all fio runs. The ARC is cleared with `zinject -a` prior to each run
++# so reads will go to disk.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++log_assert "Measure IO stats during sequential read load"
++log_onexit cleanup
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
++export TOTAL_SIZE=$(($(get_prop avail $TESTFS) * 3 / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'16 64'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'64k 128k 1m'}
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'128k 1m'}
++fi
++
++# Layout the files to be used by the read tests. Create as many files as the
++# largest number of threads. An fio run with fewer threads will use a subset
++# of the available files.
++export NUMJOBS=$(get_max $PERF_NTHREADS)
++export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
++log_must $FIO $FIO_SCRIPTS/mkfiles.fio
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$PERF_SCRIPTS/prefetch_io.d $PERFPOOL 1" "prefetch" "$VMSTAT 1" "vmstat"
++    "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Sequential reads with $PERF_RUNTYPE settings"
++do_fio_run sequential_reads.fio $FALSE $TRUE
++log_pass "Measure IO stats during sequential read load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached.ksh b/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached.ksh
+new file mode 100644
+index 0000000..70cddd4
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached.ksh
+@@ -0,0 +1,77 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the sequential_reads job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# The files to read from are created prior to the first fio run, and used
++# for all fio runs. The ARC is not cleared to ensure that all data is cached.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++log_assert "Measure IO stats during sequential read load"
++log_onexit cleanup
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Make sure the working set can be cached in the arc. Aim for 1/2 of arc.
++export TOTAL_SIZE=$(($(get_max_arc_size) / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'16 64'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'64k 128k 1m'}
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'128k 1m'}
++fi
++
++# Layout the files to be used by the read tests. Create as many files as the
++# largest number of threads. An fio run with fewer threads will use a subset
++# of the available files.
++export NUMJOBS=$(get_max $PERF_NTHREADS)
++export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
++log_must $FIO $FIO_SCRIPTS/mkfiles.fio
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$PERF_SCRIPTS/prefetch_io.d $PERFPOOL 1" "prefetch" "$VMSTAT 1" "vmstat"
++    "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Sequential cached reads with $PERF_RUNTYPE settings"
++do_fio_run sequential_reads.fio $FALSE $FALSE
++log_pass "Measure IO stats during sequential cached read load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached_clone.ksh b/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached_clone.ksh
+new file mode 100644
+index 0000000..c4790f1
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/sequential_reads_cached_clone.ksh
+@@ -0,0 +1,93 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the sequential_reads job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# The files to read from are created prior to the first fio run, and used
++# for all fio runs. This test will exercise cached read performance from
++# a clone filesystem. The data is initially cached in the ARC and then
++# a snapshot and clone are created. All the performance runs are then
++# initiated against the clone filesystem to exercise the performance of
++# reads when the ARC has to create another buffer from a different dataset.
++# It will also exercise the need to evict the duplicate buffer once the last
++# reference on that buffer is released.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++log_assert "Measure IO stats during sequential read load"
++log_onexit cleanup
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Make sure the working set can be cached in the arc. Aim for 1/2 of arc.
++export TOTAL_SIZE=$(($(get_max_arc_size) / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'16 64'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'64k 128k 1m'}
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'128k 1m'}
++fi
++
++# Layout the files to be used by the read tests. Create as many files as the
++# largest number of threads. An fio run with fewer threads will use a subset
++# of the available files.
++export NUMJOBS=$(get_max $PERF_NTHREADS)
++export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
++log_must $FIO $FIO_SCRIPTS/mkfiles.fio
++
++log_note "Creating snapshot, $TESTSNAP, of $TESTFS"
++create_snapshot $TESTFS $TESTSNAP
++log_note "Creating clone, $PERFPOOL/$TESTCLONE, from $TESTFS@$TESTSNAP"
++create_clone $TESTFS@$TESTSNAP $PERFPOOL/$TESTCLONE
++
++#
++# Reset the TESTFS to point to the clone
++#
++export TESTFS=$PERFPOOL/$TESTCLONE
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$PERF_SCRIPTS/prefetch_io.d $PERFPOOL 1" "prefetch" "$VMSTAT 1" "vmstat"
++    "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Sequential cached reads from $TESTFS with $PERF_RUNTYPE settings"
++do_fio_run sequential_reads.fio $FALSE $FALSE
++log_pass "Measure IO stats during sequential cached read load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/sequential_writes.ksh b/usr/src/test/zfs-tests/tests/perf/regression/sequential_writes.ksh
+new file mode 100644
+index 0000000..5e587e8
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/sequential_writes.ksh
+@@ -0,0 +1,69 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++#
++# Description:
++# Trigger fio runs using the sequential_writes job file. The number of runs and
++# data collected is determined by the PERF_* variables. See do_fio_run for
++# details about these variables.
++#
++# Prior to each fio run the dataset is recreated, and fio writes new files
++# into an otherwise empty pool.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/perf/perf.shlib
++
++log_assert "Measure IO stats during sequential write load"
++log_onexit cleanup
++
++function cleanup
++{
++	log_must $ZFS destroy $TESTFS
++}
++
++export TESTFS=$PERFPOOL/testfs
++recreate_perfpool
++log_must $ZFS create $PERF_FS_OPTS $TESTFS
++
++# Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
++export TOTAL_SIZE=$(($(get_prop avail $TESTFS) * 3 / 2))
++
++# Variables for use by fio.
++if [[ -n $PERF_REGRESSION_WEEKLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_WEEKLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'weekly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'8 16'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'0 1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'8k 128k 1m'}
++elif [[ -n $PERF_REGRESSION_NIGHTLY ]]; then
++	export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
++	export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
++	export PERF_NTHREADS=${PERF_NTHREADS:-'64 128'}
++	export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
++	export PERF_IOSIZES=${PERF_IOSIZES:-'8k 128k 1m'}
++fi
++
++# Set up the scripts and output files that will log performance data.
++lun_list=$(pool_to_lun_list $PERFPOOL)
++log_note "Collecting backend IO stats with lun list $lun_list"
++export collect_scripts=("$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
++    "$VMSTAT 1" "vmstat" "$MPSTAT 1" "mpstat" "$IOSTAT -xcnz 1" "iostat")
++
++log_note "Sequential writes with $PERF_RUNTYPE settings"
++do_fio_run sequential_writes.fio $TRUE $FALSE
++log_pass "Measure IO stats during sequential write load"
+diff --git a/usr/src/test/zfs-tests/tests/perf/regression/setup.ksh b/usr/src/test/zfs-tests/tests/perf/regression/setup.ksh
+new file mode 100644
+index 0000000..1206bbd
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/regression/setup.ksh
+@@ -0,0 +1,23 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++verify_runnable "global"
++verify_disk_count "$DISKS" 3
++
++log_pass
+diff --git a/usr/src/test/zfs-tests/tests/perf/scripts/Makefile b/usr/src/test/zfs-tests/tests/perf/scripts/Makefile
+new file mode 100644
+index 0000000..aad3dd5
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/scripts/Makefile
+@@ -0,0 +1,37 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/Makefile.master
++
++ROOTOPTPKG = $(ROOT)/opt/zfs-tests
++TESTDIR = $(ROOTOPTPKG)/tests/perf/scripts
++
++PROGS = io.d \
++	prefetch_io.d
++
++CMDS = $(PROGS:%=$(TESTDIR)/%)
++$(CMDS) := FILEMODE = 0555
++
++all lint clean clobber:
++
++install: $(CMDS)
++
++$(CMDS): $(TESTDIR)
++
++$(TESTDIR):
++	$(INS.dir)
++
++$(TESTDIR)/%: %
++	$(INS.file)
+diff --git a/usr/src/test/zfs-tests/tests/perf/scripts/io.d b/usr/src/test/zfs-tests/tests/perf/scripts/io.d
+new file mode 100644
+index 0000000..bbcbf8d
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/scripts/io.d
+@@ -0,0 +1,109 @@
++#!/usr/sbin/dtrace -s
++
++/*
++ * This file and its contents are supplied under the terms of the
++ * Common Development and Distribution License ("CDDL"), version 1.0.
++ * You may only use this file in accordance with the terms of version
++ * 1.0 of the CDDL.
++ *
++ * A full copy of the text of the CDDL should have accompanied this
++ * source.  A copy of the CDDL is also available via the Internet at
++ * http://www.illumos.org/license/CDDL.
++ */
++
++/*
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
++ */
++
++/*
++ * time: Seconds since the epoch
++ * @ops: The number of reads and writes per interval
++ * @bytes: Bytes read and written per interval
++ * @latencies: Mean read and write latency per interval in ns
++ *   These aggregations are indexed with read/write for back end
++ *   statistics and zfs_read/zfs_write for ZPL level statistics.
++ */
++
++#pragma D option aggsortkey
++#pragma D option quiet
++
++BEGIN
++{
++	@ops["read"] = count();
++	@ops["write"] = count();
++	@ops["zfs_read"] = count();
++	@ops["zfs_write"] = count();
++	@latencies["read"] = avg(0);
++	@latencies["write"] = avg(0);
++	@latencies["zfs_read"] = avg(0);
++	@latencies["zfs_write"] = avg(0);
++	@bytes["read"] = sum(0);
++	@bytes["write"] = sum(0);
++	@bytes["zfs_read"] = sum(0);
++	@bytes["zfs_write"] = sum(0);
++	clear(@ops);
++	clear(@latencies);
++	clear(@bytes);
++}
++
++fbt:zfs:zfs_read:entry,
++fbt:zfs:zfs_write:entry
++{
++	this->zp = (znode_t *)args[0]->v_data;
++	this->poolname = stringof(this->zp->z_zfsvfs->z_os->os_spa->spa_name);
++}
++
++fbt:zfs:zfs_read:entry,
++fbt:zfs:zfs_write:entry
++/ this->poolname == $$1 /
++{
++	self->ts = timestamp;
++	@ops[probefunc] = count();
++	@bytes[probefunc] = sum(args[1]->uio_resid);
++}
++
++fbt:zfs:zfs_read:return,
++fbt:zfs:zfs_write:return
++/ self->ts != 0 /
++{
++	@latencies[probefunc] = avg(timestamp - self->ts);
++	self->ts = 0;
++}
++
++io:::start
++/ strstr($$2, args[1]->dev_statname) != NULL /
++{
++	start[args[0]->b_edev, args[0]->b_blkno] = timestamp;
++}
++
++io:::done
++/ start[args[0]->b_edev, args[0]->b_blkno] /
++{
++	this->elapsed = timestamp - start[args[0]->b_edev, args[0]->b_blkno];
++	this->name = args[0]->b_flags & B_READ ? "read" : "write";
++	@ops[this->name] = count();
++	@bytes[this->name] = sum(args[0]->b_bcount);
++	@latencies[this->name] = avg(this->elapsed);
++	start[args[0]->b_edev, args[0]->b_blkno] = 0;
++}
++
++tick-$3s
++{
++	printf("%u\n", `time);
++	printa("ops_%-21s%@u\n", @ops);
++	printa("bytes_%-21s%@u\n", @bytes);
++	printa("latencies_%-21s%@u\n", @latencies);
++
++	clear(@ops);
++	clear(@bytes);
++	clear(@latencies);
++}
++
++ERROR
++{
++	trace(arg1);
++	trace(arg2);
++	trace(arg3);
++	trace(arg4);
++	trace(arg5);
++}
+diff --git a/usr/src/test/zfs-tests/tests/perf/scripts/prefetch_io.d b/usr/src/test/zfs-tests/tests/perf/scripts/prefetch_io.d
+new file mode 100644
+index 0000000..3689823
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/perf/scripts/prefetch_io.d
+@@ -0,0 +1,87 @@
++#!/usr/sbin/dtrace -Cs
++
++/*
++ * This file and its contents are supplied under the terms of the
++ * Common Development and Distribution License ("CDDL"), version 1.0.
++ * You may only use this file in accordance with the terms of version
++ * 1.0 of the CDDL.
++ *
++ * A full copy of the text of the CDDL should have accompanied this
++ * source.  A copy of the CDDL is also available via the Internet at
++ * http://www.illumos.org/license/CDDL.
++ */
++
++/*
++ * Copyright (c) 2015 by Delphix. All rights reserved.
++ */
++
++/*
++ * prefetch_ios: Number of IOs the prefetcher issued
++ * @pf["prefetched_demand_reads"]: Number of demand reads already prefetched
++ * @pf["sync_wait_for_async"]: Number of times sync IO waited for prefetch IO
++ * @pf["demand"]: Number of non-prefetch read IOs
++ * @pf["logical"]: Logical (uncompressed) bytes read per interval
++ * @pf["physical"]: Physical (compressed) bytes read per interval
++ */
++
++#pragma D option aggsortkey
++#pragma D option quiet
++
++#define	SPA_MINBLOCKSHIFT	9
++#define	ARC_FLAGS_PREFETCH	(1 << 3)
++#define	HDR_GET_LSIZE(hdr)	((hdr)->b_lsize << SPA_MINBLOCKSHIFT)
++#define	HDR_GET_PSIZE(hdr)	((hdr)->b_psize << SPA_MINBLOCKSHIFT)
++
++BEGIN
++{
++	prefetch_ios = `arc_stats.arcstat_prefetch_data_misses.value.ui64;
++	prefetch_ios += `arc_stats.arcstat_prefetch_metadata_misses.value.ui64;
++	@pf["demand"] = sum(0);
++	@pf["logical"] = sum(0);
++	@pf["physical"] = sum(0);
++	@pf["prefetched_demand_reads"] = count();
++	@pf["sync_wait_for_async"] = count();
++	clear(@pf);
++}
++
++arc_read:arc-demand-hit-predictive-prefetch
++{
++	@pf["prefetched_demand_reads"] = count();
++}
++
++arc_read:arc-sync-wait-for-async
++{
++	@pf["sync_wait_for_async"] = count();
++}
++
++arc_read_done:entry
++/ args[0]->io_spa->spa_name == $$1 /
++{
++	this->zio = args[0];
++	this->buf = (arc_buf_t *)this->zio->io_private;
++	this->hdr = this->buf->b_hdr;
++	@pf["demand"] = sum(this->hdr->b_flags & ARC_FLAGS_PREFETCH ? 0 : 1);
++	@pf["logical"] = sum(HDR_GET_LSIZE(this->hdr));
++	@pf["physical"] = sum(HDR_GET_PSIZE(this->hdr));
++}
++
++tick-$2s
++{
++	this->new_prefetch_ios =
++	    `arc_stats.arcstat_prefetch_data_misses.value.ui64 +
++	    `arc_stats.arcstat_prefetch_metadata_misses.value.ui64;
++	printf("%u\n%-24s\t%u\n", `time, "prefetch_ios",
++	    this->new_prefetch_ios - prefetch_ios);
++	printa("%-24s\t%@u\n", @pf);
++	prefetch_ios = this->new_prefetch_ios;
++	clear(@pf);
++}
++
++ERROR
++{
++	trace(arg1);
++	trace(arg2);
++	trace(arg3);
++	trace(arg4);
++	trace(arg5);
++}
+-- 
+1.8.3.1
+
