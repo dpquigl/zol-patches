@@ -1,0 +1,1654 @@
+From 45818ee124adeaaf947698996b4f4c722afc6d1f Mon Sep 17 00:00:00 2001
+
+From: Matthew Ahrens <mahrens@delphix.com>
+Date: Sat, 22 Aug 2015 09:14:41 -0700
+Subject: [PATCH] 4185 add new cryptographic checksums to ZFS: SHA-512, Skein,
+ Edon-R Reviewed by: George Wilson <george.wilson@delphix.com> Reviewed by:
+ Prakash Surya <prakash.surya@delphix.com> Reviewed by: Saso Kiselkov
+ <saso.kiselkov@nexenta.com> Reviewed by: Richard Lowe <richlowe@richlowe.net>
+ Approved by: Garrett D'Amore <garrett@damore.org>
+
+This is just the tests and has been broken out. This patch probably won't work.
+
+
+---
+
+ include/libtest.shlib                            |    5 
+ runfiles/delphix.run                             |    5 
+ runfiles/omnios.run                              |    7 
+ runfiles/openindiana.run                         |    7 
+ tests/functional/Makefile                        |    3 
+ tests/functional/checksum/Makefile               |   49 +++
+ tests/functional/checksum/Makefile.subdirs       |   57 +++
+ tests/functional/checksum/edonr/Makefile         |   29 +
+ tests/functional/checksum/edonr/amd64/Makefile   |   20 +
+ tests/functional/checksum/edonr/edonr_test.c     |  217 ++++++++++++++
+ tests/functional/checksum/edonr/i386/Makefile    |   19 +
+ tests/functional/checksum/edonr/sparc/Makefile   |   19 +
+ tests/functional/checksum/edonr/sparcv9/Makefile |   20 +
+ tests/functional/checksum/run_edonr_test.ksh     |   32 ++
+ tests/functional/checksum/run_sha2_test.ksh      |   32 ++
+ tests/functional/checksum/run_skein_test.ksh     |   32 ++
+ tests/functional/checksum/sha2/Makefile          |   29 +
+ tests/functional/checksum/sha2/amd64/Makefile    |   20 +
+ tests/functional/checksum/sha2/i386/Makefile     |   19 +
+ tests/functional/checksum/sha2/sha2_test.c       |  262 +++++++++++++++++
+ tests/functional/checksum/sha2/sparc/Makefile    |   19 +
+ tests/functional/checksum/sha2/sparcv9/Makefile  |   20 +
+ tests/functional/checksum/skein/Makefile         |   29 +
+ tests/functional/checksum/skein/amd64/Makefile   |   20 +
+ tests/functional/checksum/skein/i386/Makefile    |   19 +
+ tests/functional/checksum/skein/skein_test.c     |  339 +++++++++++++++++++++++
+ tests/functional/checksum/skein/sparc/Makefile   |   19 +
+ tests/functional/checksum/skein/sparcv9/Makefile |   20 +
+ 28 files changed, 1365 insertions(+), 3 deletions(-)
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/Makefile.subdirs
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/edonr/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/edonr/amd64/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/edonr/edonr_test.c
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/edonr/i386/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparc/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparcv9/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/run_edonr_test.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/run_sha2_test.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/run_skein_test.ksh
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/sha2/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/sha2/amd64/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/sha2/i386/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/sha2/sha2_test.c
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparc/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparcv9/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/skein/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/skein/amd64/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/skein/i386/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/skein/skein_test.c
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/skein/sparc/Makefile
+ create mode 100644 usr/src/test/zfs-tests/tests/functional/checksum/skein/sparcv9/Makefile
+
+
+diff --git a/usr/src/test/zfs-tests/include/libtest.shlib b/usr/src/test/zfs-tests/include/libtest.shlib
+index 7c25516..96aa5c1 100644
+--- a/usr/src/test/zfs-tests/include/libtest.shlib
++++ b/usr/src/test/zfs-tests/include/libtest.shlib
+@@ -2576,6 +2576,11 @@ function is_mp
+ 	(($($PSRINFO | $WC -l) > 1))
+ }
+ 
++function get_cpu_freq
++{
++	$PSRINFO -v 0 | $AWK '/processor operates at/ {print $6}'
++}
++
+ # Run the given command as the user provided.
+ function user_run
+ {
+diff --git a/usr/src/test/zfs-tests/runfiles/delphix.run b/usr/src/test/zfs-tests/runfiles/delphix.run
+index c98ed9f..0ab2739 100644
+--- a/usr/src/test/zfs-tests/runfiles/delphix.run
++++ b/usr/src/test/zfs-tests/runfiles/delphix.run
+@@ -72,6 +72,11 @@ tests = ['cachefile_001_pos', 'cachefile_002_pos', 'cachefile_003_pos',
+ pre =
+ post =
+ 
++[/opt/zfs-tests/tests/functional/checksum]
++tests = ['run_edonr_test', 'run_sha2_test', 'run_skein_test']
++pre =
++post =
++
+ [/opt/zfs-tests/tests/functional/clean_mirror]
+ tests = [ 'clean_mirror_001_pos', 'clean_mirror_002_pos',
+     'clean_mirror_003_pos', 'clean_mirror_004_pos']
+diff --git a/usr/src/test/zfs-tests/runfiles/omnios.run b/usr/src/test/zfs-tests/runfiles/omnios.run
+index 8908515..f19c83f 100644
+--- a/usr/src/test/zfs-tests/runfiles/omnios.run
++++ b/usr/src/test/zfs-tests/runfiles/omnios.run
+@@ -10,7 +10,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2013 by Delphix. All rights reserved.
++# Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+ #
+ 
+ [DEFAULT]
+@@ -72,6 +72,11 @@ tests = ['cachefile_001_pos', 'cachefile_002_pos', 'cachefile_003_pos',
+ pre =
+ post =
+ 
++[/opt/zfs-tests/tests/functional/checksum]
++tests = ['run_edonr_test', 'run_sha2_test', 'run_skein_test']
++pre =
++post =
++
+ [/opt/zfs-tests/tests/functional/clean_mirror]
+ tests = [ 'clean_mirror_001_pos', 'clean_mirror_002_pos',
+     'clean_mirror_003_pos', 'clean_mirror_004_pos']
+diff --git a/usr/src/test/zfs-tests/runfiles/openindiana.run b/usr/src/test/zfs-tests/runfiles/openindiana.run
+index 8908515..f525b72 100644
+--- a/usr/src/test/zfs-tests/runfiles/openindiana.run
++++ b/usr/src/test/zfs-tests/runfiles/openindiana.run
+@@ -10,7 +10,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2013 by Delphix. All rights reserved.
++# Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ #
+ 
+ [DEFAULT]
+@@ -72,6 +72,11 @@ tests = ['cachefile_001_pos', 'cachefile_002_pos', 'cachefile_003_pos',
+ pre =
+ post =
+ 
++[/opt/zfs-tests/tests/functional/checksum]
++tests = ['run_edonr_test', 'run_sha2_test', 'run_skein_test']
++pre =
++post =
++
+ [/opt/zfs-tests/tests/functional/clean_mirror]
+ tests = [ 'clean_mirror_001_pos', 'clean_mirror_002_pos',
+     'clean_mirror_003_pos', 'clean_mirror_004_pos']
+diff --git a/usr/src/test/zfs-tests/tests/functional/Makefile b/usr/src/test/zfs-tests/tests/functional/Makefile
+index 65838ab..c356192 100644
+--- a/usr/src/test/zfs-tests/tests/functional/Makefile
++++ b/usr/src/test/zfs-tests/tests/functional/Makefile
+@@ -11,7 +11,7 @@
+ #
+ 
+ #
+-# Copyright (c) 2013, 2014 by Delphix. All rights reserved.
++# Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+ #
+ 
+ .PARALLEL: $(SUBDIRS)
+@@ -21,6 +21,7 @@ SUBDIRS = acl \
+ 	bootfs \
+ 	cache \
+ 	cachefile \
++	checksum \
+ 	clean_mirror \
+ 	cli_root \
+ 	cli_user \
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/Makefile
+new file mode 100644
+index 0000000..8182cab
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/Makefile
+@@ -0,0 +1,49 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++.PARALLEL: $(SUBDIRS)
++
++include $(SRC)/Makefile.master
++
++ROOTOPTPKG = $(ROOT)/opt/zfs-tests
++TESTDIR = $(ROOTOPTPKG)/tests/functional/checksum
++
++SCRIPTS = run_edonr_test \
++	run_sha2_test \
++	run_skein_test
++
++CMDS = $(SCRIPTS:%=$(TESTDIR)/%)
++$(CMDS) := FILEMODE = 0555
++
++all lint clean clobber:
++
++install: $(CMDS)
++
++$(CMDS): $(TESTDIR)
++
++$(TESTDIR):
++	$(INS.dir)
++
++$(TESTDIR)/%: %
++	$(INS.file)
++
++$(TESTDIR)/%: %.ksh
++	$(INS.rename)
++
++SUBDIRS = edonr \
++	sha2 \
++	skein
++
++include $(SRC)/test/Makefile.com
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/Makefile.subdirs b/usr/src/test/zfs-tests/tests/functional/checksum/Makefile.subdirs
+new file mode 100644
+index 0000000..9064aab
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/Makefile.subdirs
+@@ -0,0 +1,57 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/cmd/Makefile.cmd
++
++ROOTOPTPKG = $(ROOT)/opt/zfs-tests
++TESTDIR = $(ROOTOPTPKG)/tests/functional/checksum
++
++OBJS = $(PROG:%=%.o)
++SRCS = $(OBJS:%.o=../%.c)
++
++CMD32 = $(PROG:%=$(TESTDIR)/%.$(MACH))
++CMD64 = $(PROG:%=$(TESTDIR)/%.$(MACH64))
++CMDS = $(CMD32) $(CMD64)
++$(CMDS) := FILEMODE = 0555
++
++C99MODE = -xc99=%all
++CFLAGS = -I $(SRC)/uts/common -D_KERNEL
++LDLIBS += -lmd
++LINTFLAGS += -u
++LINTFLAGS64 += -u
++
++all: $(PROG) $(TESTDIR)
++
++lint: lint_SRCS
++
++clobber: clean
++
++clean:
++	$(RM) $(PROG)
++
++include $(SRC)/cmd/Makefile.targ
++
++$(TESTDIR):
++	$(INS.dir)
++
++$(TESTDIR)/%.$(MACH): %
++	$(INS.rename)
++
++$(TESTDIR)/%.$(MACH64): %
++	$(INS.rename)
++
++%: ../%.c
++	$(LINK.c) -o $@ $< $(LDLIBS)
++	$(POST_PROCESS)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/edonr/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/Makefile
+new file mode 100644
+index 0000000..e81deea
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/Makefile
+@@ -0,0 +1,29 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/Makefile.master
++include $(SRC)/test/Makefile.com
++
++SUBDIRS = $(MACH)
++$(BUILD64) SUBDIRS += $(MACH64)
++
++all: $(SUBDIRS)
++
++clean clobber lint: $(SUBDIRS)
++
++install: $(SUBDIRS)
++
++$(SUBDIRS):
++	@cd $@; pwd; $(MAKE) $(TARGET)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/edonr/amd64/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/amd64/Makefile
+new file mode 100644
+index 0000000..9e72bca
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/amd64/Makefile
+@@ -0,0 +1,20 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=edonr_test
++include ../../Makefile.subdirs
++include $(SRC)/cmd/Makefile.cmd.64
++
++install: all $(CMD64)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/edonr/edonr_test.c b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/edonr_test.c
+new file mode 100644
+index 0000000..eb13930
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/edonr_test.c
+@@ -0,0 +1,217 @@
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or http://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++/*
++ * Copyright 2013 Saso Kiselkov. All rights reserved.
++ */
++
++/*
++ * This is just to keep the compiler happy about sys/time.h not declaring
++ * gettimeofday due to -D_KERNEL (we can do this since we're actually
++ * running in userspace, but we need -D_KERNEL for the remaining Edon-R code).
++ */
++#ifdef	_KERNEL
++#undef	_KERNEL
++#endif
++
++#include <sys/edonr.h>
++#include <stdlib.h>
++#include <strings.h>
++#include <stdio.h>
++#include <sys/time.h>
++#include <note.h>
++
++/*
++ * Test messages from:
++ * http://csrc.nist.gov/groups/ST/toolkit/documents/Examples/SHA_All.pdf
++ */
++const char	*test_msg0 = "abc";
++const char	*test_msg1 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmn"
++	"lmnomnopnopq";
++const char	*test_msg2 = "abcdefghbcdefghicdefghijdefghijkefghijklfghi"
++	"jklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
++
++/*
++ * Test digests computed by hand. There's no formal standard or spec for edonr.
++ */
++const uint8_t	edonr_224_test_digests[][28] = {
++	{
++		/* for test_msg0 */
++		0x56, 0x63, 0xc4, 0x93, 0x95, 0x20, 0xfa, 0xf6,
++		0x12, 0x31, 0x65, 0xa4, 0x66, 0xf2, 0x56, 0x01,
++		0x95, 0x2e, 0xa9, 0xe4, 0x24, 0xdd, 0xc9, 0x6b,
++		0xef, 0xd0, 0x40, 0x94
++	},
++	{
++		/* for test_msg1 */
++		0xd0, 0x13, 0xe4, 0x87, 0x4d, 0x06, 0x8d, 0xca,
++		0x4e, 0x14, 0xb9, 0x37, 0x2f, 0xce, 0x12, 0x20,
++		0x60, 0xf8, 0x5c, 0x0a, 0xfd, 0x7a, 0x7d, 0x97,
++		0x88, 0x2b, 0x05, 0x75
++	}
++	/* no test vector for test_msg2 */
++};
++
++const uint8_t	edonr_256_test_digests[][32] = {
++	{
++		/* for test_msg0 */
++		0x54, 0xd7, 0x8b, 0x13, 0xc7, 0x4e, 0xda, 0x5a,
++		0xed, 0xc2, 0x71, 0xcc, 0x88, 0x1f, 0xb2, 0x2f,
++		0x83, 0x99, 0xaf, 0xd3, 0x04, 0x0b, 0x6a, 0x39,
++		0x2d, 0x73, 0x94, 0x05, 0x50, 0x8d, 0xd8, 0x51
++	},
++	{
++		/* for test_msg1 */
++		0x49, 0x2d, 0x0b, 0x19, 0xab, 0x1e, 0xde, 0x3a,
++		0xea, 0x9b, 0xf2, 0x39, 0x3a, 0xb1, 0x21, 0xde,
++		0x21, 0xf6, 0x80, 0x1f, 0xad, 0xbe, 0x8b, 0x07,
++		0xc7, 0xfb, 0xe6, 0x99, 0x0e, 0x4d, 0x73, 0x63
++	}
++	/* no test vectorfor test_msg2 */
++};
++
++const uint8_t	edonr_384_test_digests[][48] = {
++	{
++		/* for test_msg0 */
++		0x0e, 0x7c, 0xd7, 0x85, 0x78, 0x77, 0xe0, 0x89,
++		0x5b, 0x1c, 0xdf, 0x49, 0xf4, 0x1d, 0x20, 0x9c,
++		0x72, 0x7d, 0x2e, 0x57, 0x9b, 0x9b, 0x9a, 0xdc,
++		0x60, 0x27, 0x97, 0x82, 0xb9, 0x90, 0x72, 0xec,
++		0x7e, 0xce, 0xd3, 0x16, 0x5f, 0x47, 0x75, 0x48,
++		0xfa, 0x60, 0x72, 0x7e, 0x01, 0xc7, 0x7c, 0xc6
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0xe2, 0x34, 0xa1, 0x02, 0x83, 0x76, 0xae, 0xe6,
++		0x82, 0xd9, 0x38, 0x32, 0x0e, 0x00, 0x78, 0xd2,
++		0x34, 0xdb, 0xb9, 0xbd, 0xf0, 0x08, 0xa8, 0x0f,
++		0x63, 0x1c, 0x3d, 0x4a, 0xfd, 0x0a, 0xe9, 0x59,
++		0xdc, 0xd4, 0xce, 0xcd, 0x8d, 0x67, 0x6c, 0xea,
++		0xbb, 0x1a, 0x32, 0xed, 0x5c, 0x6b, 0xf1, 0x7f
++	}
++};
++
++const uint8_t	edonr_512_test_digests[][64] = {
++	{
++		/* for test_msg0 */
++		0x1b, 0x14, 0xdb, 0x15, 0x5f, 0x1d, 0x40, 0x65,
++		0x94, 0xb8, 0xce, 0xf7, 0x0a, 0x43, 0x62, 0xec,
++		0x6b, 0x5d, 0xe6, 0xa5, 0xda, 0xf5, 0x0e, 0xc9,
++		0x99, 0xe9, 0x87, 0xc1, 0x9d, 0x30, 0x49, 0xe2,
++		0xde, 0x59, 0x77, 0xbb, 0x05, 0xb1, 0xbb, 0x22,
++		0x00, 0x50, 0xa1, 0xea, 0x5b, 0x46, 0xa9, 0xf1,
++		0x74, 0x0a, 0xca, 0xfb, 0xf6, 0xb4, 0x50, 0x32,
++		0xad, 0xc9, 0x0c, 0x62, 0x83, 0x72, 0xc2, 0x2b
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0x53, 0x51, 0x07, 0x0d, 0xc5, 0x1c, 0x3b, 0x2b,
++		0xac, 0xa5, 0xa6, 0x0d, 0x02, 0x52, 0xcc, 0xb4,
++		0xe4, 0x92, 0x1a, 0x96, 0xfe, 0x5a, 0x69, 0xe7,
++		0x6d, 0xad, 0x48, 0xfd, 0x21, 0xa0, 0x84, 0x5a,
++		0xd5, 0x7f, 0x88, 0x0b, 0x3e, 0x4a, 0x90, 0x7b,
++		0xc5, 0x03, 0x15, 0x18, 0x42, 0xbb, 0x94, 0x9e,
++		0x1c, 0xba, 0x74, 0x39, 0xa6, 0x40, 0x9a, 0x34,
++		0xb8, 0x43, 0x6c, 0xb4, 0x69, 0x21, 0x58, 0x3c
++	}
++};
++
++int
++main(int argc, char *argv[])
++{
++	boolean_t	failed = B_FALSE;
++	uint64_t	cpu_mhz = 0;
++
++	if (argc == 2)
++		cpu_mhz = atoi(argv[1]);
++
++#define	EDONR_ALGO_TEST(_m, mode, testdigest)				\
++	do {								\
++		EdonRState	ctx;					\
++		uint8_t		digest[mode / 8];			\
++		EdonRInit(&ctx, mode);					\
++		EdonRUpdate(&ctx, (const uint8_t *) _m, strlen(_m) * 8);\
++		EdonRFinal(&ctx, digest);				\
++		(void) printf("Edon-R-%-6sMessage: " #_m		\
++		    "\tResult: ", #mode);				\
++		if (bcmp(digest, testdigest, mode / 8) == 0) {		\
++			(void) printf("OK\n");				\
++		} else {						\
++			(void) printf("FAILED!\n");			\
++			failed = B_TRUE;				\
++		}							\
++		NOTE(CONSTCOND)						\
++	} while (0)
++
++#define	EDONR_PERF_TEST(mode)						\
++	do {								\
++		EdonRState	ctx;					\
++		uint8_t		digest[mode / 8];			\
++		uint8_t		block[131072];				\
++		uint64_t	delta;					\
++		double		cpb = 0;				\
++		int		i;					\
++		struct timeval	start, end;				\
++		bzero(block, sizeof (block));				\
++		(void) gettimeofday(&start, NULL);			\
++		EdonRInit(&ctx, mode);					\
++		for (i = 0; i < 8192; i++)				\
++			EdonRUpdate(&ctx, block, sizeof (block) * 8);	\
++		EdonRFinal(&ctx, digest);				\
++		(void) gettimeofday(&end, NULL);			\
++		delta = (end.tv_sec * 1000000llu + end.tv_usec) -	\
++		    (start.tv_sec * 1000000llu + start.tv_usec);	\
++		if (cpu_mhz != 0) {					\
++			cpb = (cpu_mhz * 1e6 * ((double)delta /		\
++			    1000000)) / (8192 * 128 * 1024);		\
++		}							\
++		(void) printf("Edon-R-%-6s%llu us (%.02f CPB)\n", #mode,\
++		    (u_longlong_t)delta, cpb);				\
++		NOTE(CONSTCOND)						\
++	} while (0)
++
++	(void) printf("Running algorithm correctness tests:\n");
++	EDONR_ALGO_TEST(test_msg0, 224, edonr_224_test_digests[0]);
++	EDONR_ALGO_TEST(test_msg1, 224, edonr_224_test_digests[1]);
++	EDONR_ALGO_TEST(test_msg0, 256, edonr_256_test_digests[0]);
++	EDONR_ALGO_TEST(test_msg1, 256, edonr_256_test_digests[1]);
++	EDONR_ALGO_TEST(test_msg0, 384, edonr_384_test_digests[0]);
++	EDONR_ALGO_TEST(test_msg2, 384, edonr_384_test_digests[2]);
++	EDONR_ALGO_TEST(test_msg0, 512, edonr_512_test_digests[0]);
++	EDONR_ALGO_TEST(test_msg2, 512, edonr_512_test_digests[2]);
++	if (failed)
++		return (1);
++
++	(void) printf("Running performance tests (hashing 1024 MiB of "
++	    "data):\n");
++	EDONR_PERF_TEST(256);
++	EDONR_PERF_TEST(512);
++
++	return (0);
++}
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/edonr/i386/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/i386/Makefile
+new file mode 100644
+index 0000000..9b3ee25
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/i386/Makefile
+@@ -0,0 +1,19 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=edonr_test
++include ../../Makefile.subdirs
++
++install: all $(CMD32)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparc/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparc/Makefile
+new file mode 100644
+index 0000000..9b3ee25
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparc/Makefile
+@@ -0,0 +1,19 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=edonr_test
++include ../../Makefile.subdirs
++
++install: all $(CMD32)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparcv9/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparcv9/Makefile
+new file mode 100644
+index 0000000..9e72bca
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/edonr/sparcv9/Makefile
+@@ -0,0 +1,20 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=edonr_test
++include ../../Makefile.subdirs
++include $(SRC)/cmd/Makefile.cmd.64
++
++install: all $(CMD64)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/run_edonr_test.ksh b/usr/src/test/zfs-tests/tests/functional/checksum/run_edonr_test.ksh
+new file mode 100644
+index 0000000..54ea271
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/run_edonr_test.ksh
+@@ -0,0 +1,32 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# Description:
++# Run the tests for the EdonR hash algorithm.
++#
++
++log_assert "Run the tests for the EdonR hash algorithm."
++
++freq=$(get_cpu_freq)
++for isa in $($ISAINFO); do
++	log_must $STF_SUITE/tests/functional/checksum/edonr_test.$isa $freq
++done
++
++log_pass "EdonR tests passed."
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/run_sha2_test.ksh b/usr/src/test/zfs-tests/tests/functional/checksum/run_sha2_test.ksh
+new file mode 100644
+index 0000000..7ebe897
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/run_sha2_test.ksh
+@@ -0,0 +1,32 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# Description:
++# Run the tests for the SHA-2 hash algorithm.
++#
++
++log_assert "Run the tests for the SHA-2 hash algorithm."
++
++freq=$(get_cpu_freq)
++for isa in $($ISAINFO); do
++	log_must $STF_SUITE/tests/functional/checksum/sha2_test.$isa $freq
++done
++
++log_pass "SHA-2 tests passed."
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/run_skein_test.ksh b/usr/src/test/zfs-tests/tests/functional/checksum/run_skein_test.ksh
+new file mode 100644
+index 0000000..4ca9e1a
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/run_skein_test.ksh
+@@ -0,0 +1,32 @@
++#!/usr/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# Description:
++# Run the tests for the Skein hash algorithm.
++#
++
++log_assert "Run the tests for the Skein hash algorithm."
++
++freq=$(get_cpu_freq)
++for isa in $($ISAINFO); do
++	log_must $STF_SUITE/tests/functional/checksum/skein_test.$isa $freq
++done
++
++log_pass "Skein tests passed."
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/sha2/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/Makefile
+new file mode 100644
+index 0000000..e81deea
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/Makefile
+@@ -0,0 +1,29 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/Makefile.master
++include $(SRC)/test/Makefile.com
++
++SUBDIRS = $(MACH)
++$(BUILD64) SUBDIRS += $(MACH64)
++
++all: $(SUBDIRS)
++
++clean clobber lint: $(SUBDIRS)
++
++install: $(SUBDIRS)
++
++$(SUBDIRS):
++	@cd $@; pwd; $(MAKE) $(TARGET)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/sha2/amd64/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/amd64/Makefile
+new file mode 100644
+index 0000000..ee81ed9
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/amd64/Makefile
+@@ -0,0 +1,20 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=sha2_test
++include ../../Makefile.subdirs
++include $(SRC)/cmd/Makefile.cmd.64
++
++install: all $(CMD64)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/sha2/i386/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/i386/Makefile
+new file mode 100644
+index 0000000..41b7f07
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/i386/Makefile
+@@ -0,0 +1,19 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=sha2_test
++include ../../Makefile.subdirs
++
++install: all $(CMD32)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sha2_test.c b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sha2_test.c
+new file mode 100644
+index 0000000..59992e3
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sha2_test.c
+@@ -0,0 +1,262 @@
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or http://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++/*
++ * Copyright 2013 Saso Kiselkov. All rights reserved.
++ */
++
++/*
++ * This is just to keep the compiler happy about sys/time.h not declaring
++ * gettimeofday due to -D_KERNEL (we can do this since we're actually
++ * running in userspace, but we need -D_KERNEL for the remaining SHA2 code).
++ */
++#ifdef	_KERNEL
++#undef	_KERNEL
++#endif
++
++#include <sys/varargs.h>
++#include <stdlib.h>
++#include <strings.h>
++#include <stdio.h>
++#include <sys/time.h>
++#define	_SHA2_IMPL
++#include <sys/sha2.h>
++#include <note.h>
++
++/*
++ * Test messages from:
++ * http://csrc.nist.gov/groups/ST/toolkit/documents/Examples/SHA_All.pdf
++ */
++
++const char	*test_msg0 = "abc";
++const char	*test_msg1 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmn"
++	"lmnomnopnopq";
++const char	*test_msg2 = "abcdefghbcdefghicdefghijdefghijkefghijklfghi"
++	"jklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
++
++/*
++ * Test digests from:
++ * http://csrc.nist.gov/groups/ST/toolkit/documents/Examples/SHA_All.pdf
++ */
++const uint8_t	sha256_test_digests[][32] = {
++	{
++		/* for test_msg0 */
++		0xBA, 0x78, 0x16, 0xBF, 0x8F, 0x01, 0xCF, 0xEA,
++		0x41, 0x41, 0x40, 0xDE, 0x5D, 0xAE, 0x22, 0x23,
++		0xB0, 0x03, 0x61, 0xA3, 0x96, 0x17, 0x7A, 0x9C,
++		0xB4, 0x10, 0xFF, 0x61, 0xF2, 0x00, 0x15, 0xAD
++	},
++	{
++		/* for test_msg1 */
++		0x24, 0x8D, 0x6A, 0x61, 0xD2, 0x06, 0x38, 0xB8,
++		0xE5, 0xC0, 0x26, 0x93, 0x0C, 0x3E, 0x60, 0x39,
++		0xA3, 0x3C, 0xE4, 0x59, 0x64, 0xFF, 0x21, 0x67,
++		0xF6, 0xEC, 0xED, 0xD4, 0x19, 0xDB, 0x06, 0xC1
++	}
++	/* no test vector for test_msg2 */
++};
++
++const uint8_t	sha384_test_digests[][48] = {
++	{
++		/* for test_msg0 */
++		0xCB, 0x00, 0x75, 0x3F, 0x45, 0xA3, 0x5E, 0x8B,
++		0xB5, 0xA0, 0x3D, 0x69, 0x9A, 0xC6, 0x50, 0x07,
++		0x27, 0x2C, 0x32, 0xAB, 0x0E, 0xDE, 0xD1, 0x63,
++		0x1A, 0x8B, 0x60, 0x5A, 0x43, 0xFF, 0x5B, 0xED,
++		0x80, 0x86, 0x07, 0x2B, 0xA1, 0xE7, 0xCC, 0x23,
++		0x58, 0xBA, 0xEC, 0xA1, 0x34, 0xC8, 0x25, 0xA7
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0x09, 0x33, 0x0C, 0x33, 0xF7, 0x11, 0x47, 0xE8,
++		0x3D, 0x19, 0x2F, 0xC7, 0x82, 0xCD, 0x1B, 0x47,
++		0x53, 0x11, 0x1B, 0x17, 0x3B, 0x3B, 0x05, 0xD2,
++		0x2F, 0xA0, 0x80, 0x86, 0xE3, 0xB0, 0xF7, 0x12,
++		0xFC, 0xC7, 0xC7, 0x1A, 0x55, 0x7E, 0x2D, 0xB9,
++		0x66, 0xC3, 0xE9, 0xFA, 0x91, 0x74, 0x60, 0x39
++	}
++};
++
++const uint8_t	sha512_test_digests[][64] = {
++	{
++		/* for test_msg0 */
++		0xDD, 0xAF, 0x35, 0xA1, 0x93, 0x61, 0x7A, 0xBA,
++		0xCC, 0x41, 0x73, 0x49, 0xAE, 0x20, 0x41, 0x31,
++		0x12, 0xE6, 0xFA, 0x4E, 0x89, 0xA9, 0x7E, 0xA2,
++		0x0A, 0x9E, 0xEE, 0xE6, 0x4B, 0x55, 0xD3, 0x9A,
++		0x21, 0x92, 0x99, 0x2A, 0x27, 0x4F, 0xC1, 0xA8,
++		0x36, 0xBA, 0x3C, 0x23, 0xA3, 0xFE, 0xEB, 0xBD,
++		0x45, 0x4D, 0x44, 0x23, 0x64, 0x3C, 0xE8, 0x0E,
++		0x2A, 0x9A, 0xC9, 0x4F, 0xA5, 0x4C, 0xA4, 0x9F
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0x8E, 0x95, 0x9B, 0x75, 0xDA, 0xE3, 0x13, 0xDA,
++		0x8C, 0xF4, 0xF7, 0x28, 0x14, 0xFC, 0x14, 0x3F,
++		0x8F, 0x77, 0x79, 0xC6, 0xEB, 0x9F, 0x7F, 0xA1,
++		0x72, 0x99, 0xAE, 0xAD, 0xB6, 0x88, 0x90, 0x18,
++		0x50, 0x1D, 0x28, 0x9E, 0x49, 0x00, 0xF7, 0xE4,
++		0x33, 0x1B, 0x99, 0xDE, 0xC4, 0xB5, 0x43, 0x3A,
++		0xC7, 0xD3, 0x29, 0xEE, 0xB6, 0xDD, 0x26, 0x54,
++		0x5E, 0x96, 0xE5, 0x5B, 0x87, 0x4B, 0xE9, 0x09
++	}
++};
++
++const uint8_t	sha512_224_test_digests[][28] = {
++	{
++		/* for test_msg0 */
++		0x46, 0x34, 0x27, 0x0F, 0x70, 0x7B, 0x6A, 0x54,
++		0xDA, 0xAE, 0x75, 0x30, 0x46, 0x08, 0x42, 0xE2,
++		0x0E, 0x37, 0xED, 0x26, 0x5C, 0xEE, 0xE9, 0xA4,
++		0x3E, 0x89, 0x24, 0xAA
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0x23, 0xFE, 0xC5, 0xBB, 0x94, 0xD6, 0x0B, 0x23,
++		0x30, 0x81, 0x92, 0x64, 0x0B, 0x0C, 0x45, 0x33,
++		0x35, 0xD6, 0x64, 0x73, 0x4F, 0xE4, 0x0E, 0x72,
++		0x68, 0x67, 0x4A, 0xF9
++	}
++};
++
++const uint8_t	sha512_256_test_digests[][32] = {
++	{
++		/* for test_msg0 */
++		0x53, 0x04, 0x8E, 0x26, 0x81, 0x94, 0x1E, 0xF9,
++		0x9B, 0x2E, 0x29, 0xB7, 0x6B, 0x4C, 0x7D, 0xAB,
++		0xE4, 0xC2, 0xD0, 0xC6, 0x34, 0xFC, 0x6D, 0x46,
++		0xE0, 0xE2, 0xF1, 0x31, 0x07, 0xE7, 0xAF, 0x23
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0x39, 0x28, 0xE1, 0x84, 0xFB, 0x86, 0x90, 0xF8,
++		0x40, 0xDA, 0x39, 0x88, 0x12, 0x1D, 0x31, 0xBE,
++		0x65, 0xCB, 0x9D, 0x3E, 0xF8, 0x3E, 0xE6, 0x14,
++		0x6F, 0xEA, 0xC8, 0x61, 0xE1, 0x9B, 0x56, 0x3A
++	}
++};
++
++/*
++ * Local reimplementation of cmn_err, since it's used in sha2.c.
++ */
++/*ARGSUSED*/
++void
++cmn_err(int level, char *format, ...)
++{
++	va_list ap;
++	va_start(ap, format);
++	/* LINTED: E_SEC_PRINTF_VAR_FMT */
++	(void) vfprintf(stderr, format, ap);
++	va_end(ap);
++}
++
++int
++main(int argc, char *argv[])
++{
++	boolean_t	failed = B_FALSE;
++	uint64_t	cpu_mhz = 0;
++
++	if (argc == 2)
++		cpu_mhz = atoi(argv[1]);
++
++#define	SHA2_ALGO_TEST(_m, mode, diglen, testdigest)			\
++	do {								\
++		SHA2_CTX		ctx;				\
++		uint8_t			digest[diglen / 8];		\
++		SHA2Init(SHA ## mode ## _MECH_INFO_TYPE, &ctx);		\
++		SHA2Update(&ctx, _m, strlen(_m));			\
++		SHA2Final(digest, &ctx);				\
++		(void) printf("SHA%-9sMessage: " #_m			\
++		    "\tResult: ", #mode);				\
++		if (bcmp(digest, testdigest, diglen / 8) == 0) {	\
++			(void) printf("OK\n");				\
++		} else {						\
++			(void) printf("FAILED!\n");			\
++			failed = B_TRUE;				\
++		}							\
++		NOTE(CONSTCOND)						\
++	} while (0)
++
++#define	SHA2_PERF_TEST(mode, diglen)					\
++	do {								\
++		SHA2_CTX	ctx;					\
++		uint8_t		digest[diglen / 8];			\
++		uint8_t		block[131072];				\
++		uint64_t	delta;					\
++		double		cpb = 0;				\
++		int		i;					\
++		struct timeval	start, end;				\
++		bzero(block, sizeof (block));				\
++		(void) gettimeofday(&start, NULL);			\
++		SHA2Init(SHA ## mode ## _MECH_INFO_TYPE, &ctx);		\
++		for (i = 0; i < 8192; i++)				\
++			SHA2Update(&ctx, block, sizeof (block));	\
++		SHA2Final(digest, &ctx);				\
++		(void) gettimeofday(&end, NULL);			\
++		delta = (end.tv_sec * 1000000llu + end.tv_usec) -	\
++		    (start.tv_sec * 1000000llu + start.tv_usec);	\
++		if (cpu_mhz != 0) {					\
++			cpb = (cpu_mhz * 1e6 * ((double)delta /		\
++			    1000000)) / (8192 * 128 * 1024);		\
++		}							\
++		(void) printf("SHA%-9s%llu us (%.02f CPB)\n", #mode,	\
++		    (u_longlong_t)delta, cpb);				\
++		NOTE(CONSTCOND)						\
++	} while (0)
++
++	(void) printf("Running algorithm correctness tests:\n");
++	SHA2_ALGO_TEST(test_msg0, 256, 256, sha256_test_digests[0]);
++	SHA2_ALGO_TEST(test_msg1, 256, 256, sha256_test_digests[1]);
++	SHA2_ALGO_TEST(test_msg0, 384, 384, sha384_test_digests[0]);
++	SHA2_ALGO_TEST(test_msg2, 384, 384, sha384_test_digests[2]);
++	SHA2_ALGO_TEST(test_msg0, 512, 512, sha512_test_digests[0]);
++	SHA2_ALGO_TEST(test_msg2, 512, 512, sha512_test_digests[2]);
++	SHA2_ALGO_TEST(test_msg0, 512_224, 224, sha512_224_test_digests[0]);
++	SHA2_ALGO_TEST(test_msg2, 512_224, 224, sha512_224_test_digests[2]);
++	SHA2_ALGO_TEST(test_msg0, 512_256, 256, sha512_256_test_digests[0]);
++	SHA2_ALGO_TEST(test_msg2, 512_256, 256, sha512_256_test_digests[2]);
++
++	if (failed)
++		return (1);
++
++	(void) printf("Running performance tests (hashing 1024 MiB of "
++	    "data):\n");
++	SHA2_PERF_TEST(256, 256);
++	SHA2_PERF_TEST(512, 512);
++
++	return (0);
++}
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparc/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparc/Makefile
+new file mode 100644
+index 0000000..41b7f07
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparc/Makefile
+@@ -0,0 +1,19 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=sha2_test
++include ../../Makefile.subdirs
++
++install: all $(CMD32)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparcv9/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparcv9/Makefile
+new file mode 100644
+index 0000000..ee81ed9
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/sha2/sparcv9/Makefile
+@@ -0,0 +1,20 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=sha2_test
++include ../../Makefile.subdirs
++include $(SRC)/cmd/Makefile.cmd.64
++
++install: all $(CMD64)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/skein/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/skein/Makefile
+new file mode 100644
+index 0000000..e81deea
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/skein/Makefile
+@@ -0,0 +1,29 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++include $(SRC)/Makefile.master
++include $(SRC)/test/Makefile.com
++
++SUBDIRS = $(MACH)
++$(BUILD64) SUBDIRS += $(MACH64)
++
++all: $(SUBDIRS)
++
++clean clobber lint: $(SUBDIRS)
++
++install: $(SUBDIRS)
++
++$(SUBDIRS):
++	@cd $@; pwd; $(MAKE) $(TARGET)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/skein/amd64/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/skein/amd64/Makefile
+new file mode 100644
+index 0000000..c2f6093
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/skein/amd64/Makefile
+@@ -0,0 +1,20 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=skein_test
++include ../../Makefile.subdirs
++include $(SRC)/cmd/Makefile.cmd.64
++
++install: all $(CMD64)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/skein/i386/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/skein/i386/Makefile
+new file mode 100644
+index 0000000..220481c
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/skein/i386/Makefile
+@@ -0,0 +1,19 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=skein_test
++include ../../Makefile.subdirs
++
++install: all $(CMD32)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/skein/skein_test.c b/usr/src/test/zfs-tests/tests/functional/checksum/skein/skein_test.c
+new file mode 100644
+index 0000000..ed57fec
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/skein/skein_test.c
+@@ -0,0 +1,339 @@
++/*
++ * CDDL HEADER START
++ *
++ * The contents of this file are subject to the terms of the
++ * Common Development and Distribution License (the "License").
++ * You may not use this file except in compliance with the License.
++ *
++ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++ * or http://opensource.org/licenses/CDDL-1.0.
++ * See the License for the specific language governing permissions
++ * and limitations under the License.
++ *
++ * When distributing Covered Code, include this CDDL HEADER in each
++ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++ * If applicable, add the following below this CDDL HEADER, with the
++ * fields enclosed by brackets "[]" replaced with your own identifying
++ * information: Portions Copyright [yyyy] [name of copyright owner]
++ *
++ * CDDL HEADER END
++ */
++
++/*
++ * Copyright 2013 Saso Kiselkov. All rights reserved.
++ */
++
++/*
++ * This is just to keep the compiler happy about sys/time.h not declaring
++ * gettimeofday due to -D_KERNEL (we can do this since we're actually
++ * running in userspace, but we need -D_KERNEL for the remaining Skein code).
++ */
++#ifdef	_KERNEL
++#undef	_KERNEL
++#endif
++
++#include <sys/skein.h>
++#include <stdlib.h>
++#include <strings.h>
++#include <stdio.h>
++#include <sys/time.h>
++#include <note.h>
++
++/*
++ * Skein test suite using values from the Skein V1.3 specification found at:
++ * http://www.skein-hash.info/sites/default/files/skein1.3.pdf
++ */
++
++/*
++ * Test messages from the Skein spec, Appendix C.
++ */
++const uint8_t	test_msg0[] = {
++	0xFF
++};
++
++const uint8_t	test_msg1[] = {
++	0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
++	0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0,
++	0xEF, 0xEE, 0xED, 0xEC, 0xEB, 0xEA, 0xE9, 0xE8,
++	0xE7, 0xE6, 0xE5, 0xE4, 0xE3, 0xE2, 0xE1, 0xE0
++};
++
++const uint8_t	test_msg2[] = {
++	0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
++	0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0,
++	0xEF, 0xEE, 0xED, 0xEC, 0xEB, 0xEA, 0xE9, 0xE8,
++	0xE7, 0xE6, 0xE5, 0xE4, 0xE3, 0xE2, 0xE1, 0xE0,
++	0xDF, 0xDE, 0xDD, 0xDC, 0xDB, 0xDA, 0xD9, 0xD8,
++	0xD7, 0xD6, 0xD5, 0xD4, 0xD3, 0xD2, 0xD1, 0xD0,
++	0xCF, 0xCE, 0xCD, 0xCC, 0xCB, 0xCA, 0xC9, 0xC8,
++	0xC7, 0xC6, 0xC5, 0xC4, 0xC3, 0xC2, 0xC1, 0xC0
++};
++
++const uint8_t	test_msg3[] = {
++	0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
++	0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0,
++	0xEF, 0xEE, 0xED, 0xEC, 0xEB, 0xEA, 0xE9, 0xE8,
++	0xE7, 0xE6, 0xE5, 0xE4, 0xE3, 0xE2, 0xE1, 0xE0,
++	0xDF, 0xDE, 0xDD, 0xDC, 0xDB, 0xDA, 0xD9, 0xD8,
++	0xD7, 0xD6, 0xD5, 0xD4, 0xD3, 0xD2, 0xD1, 0xD0,
++	0xCF, 0xCE, 0xCD, 0xCC, 0xCB, 0xCA, 0xC9, 0xC8,
++	0xC7, 0xC6, 0xC5, 0xC4, 0xC3, 0xC2, 0xC1, 0xC0,
++	0xBF, 0xBE, 0xBD, 0xBC, 0xBB, 0xBA, 0xB9, 0xB8,
++	0xB7, 0xB6, 0xB5, 0xB4, 0xB3, 0xB2, 0xB1, 0xB0,
++	0xAF, 0xAE, 0xAD, 0xAC, 0xAB, 0xAA, 0xA9, 0xA8,
++	0xA7, 0xA6, 0xA5, 0xA4, 0xA3, 0xA2, 0xA1, 0xA0,
++	0x9F, 0x9E, 0x9D, 0x9C, 0x9B, 0x9A, 0x99, 0x98,
++	0x97, 0x96, 0x95, 0x94, 0x93, 0x92, 0x91, 0x90,
++	0x8F, 0x8E, 0x8D, 0x8C, 0x8B, 0x8A, 0x89, 0x88,
++	0x87, 0x86, 0x85, 0x84, 0x83, 0x82, 0x81, 0x80
++};
++
++const uint8_t	test_msg4[] = {
++	0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
++	0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0,
++	0xEF, 0xEE, 0xED, 0xEC, 0xEB, 0xEA, 0xE9, 0xE8,
++	0xE7, 0xE6, 0xE5, 0xE4, 0xE3, 0xE2, 0xE1, 0xE0,
++	0xDF, 0xDE, 0xDD, 0xDC, 0xDB, 0xDA, 0xD9, 0xD8,
++	0xD7, 0xD6, 0xD5, 0xD4, 0xD3, 0xD2, 0xD1, 0xD0,
++	0xCF, 0xCE, 0xCD, 0xCC, 0xCB, 0xCA, 0xC9, 0xC8,
++	0xC7, 0xC6, 0xC5, 0xC4, 0xC3, 0xC2, 0xC1, 0xC0,
++	0xBF, 0xBE, 0xBD, 0xBC, 0xBB, 0xBA, 0xB9, 0xB8,
++	0xB7, 0xB6, 0xB5, 0xB4, 0xB3, 0xB2, 0xB1, 0xB0,
++	0xAF, 0xAE, 0xAD, 0xAC, 0xAB, 0xAA, 0xA9, 0xA8,
++	0xA7, 0xA6, 0xA5, 0xA4, 0xA3, 0xA2, 0xA1, 0xA0,
++	0x9F, 0x9E, 0x9D, 0x9C, 0x9B, 0x9A, 0x99, 0x98,
++	0x97, 0x96, 0x95, 0x94, 0x93, 0x92, 0x91, 0x90,
++	0x8F, 0x8E, 0x8D, 0x8C, 0x8B, 0x8A, 0x89, 0x88,
++	0x87, 0x86, 0x85, 0x84, 0x83, 0x82, 0x81, 0x80,
++	0x7F, 0x7E, 0x7D, 0x7C, 0x7B, 0x7A, 0x79, 0x78,
++	0x77, 0x76, 0x75, 0x74, 0x73, 0x72, 0x71, 0x70,
++	0x6F, 0x6E, 0x6D, 0x6C, 0x6B, 0x6A, 0x69, 0x68,
++	0x67, 0x66, 0x65, 0x64, 0x63, 0x62, 0x61, 0x60,
++	0x5F, 0x5E, 0x5D, 0x5C, 0x5B, 0x5A, 0x59, 0x58,
++	0x57, 0x56, 0x55, 0x54, 0x53, 0x52, 0x51, 0x50,
++	0x4F, 0x4E, 0x4D, 0x4C, 0x4B, 0x4A, 0x49, 0x48,
++	0x47, 0x46, 0x45, 0x44, 0x43, 0x42, 0x41, 0x40,
++	0x3F, 0x3E, 0x3D, 0x3C, 0x3B, 0x3A, 0x39, 0x38,
++	0x37, 0x36, 0x35, 0x34, 0x33, 0x32, 0x31, 0x30,
++	0x2F, 0x2E, 0x2D, 0x2C, 0x2B, 0x2A, 0x29, 0x28,
++	0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21, 0x20,
++	0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19, 0x18,
++	0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11, 0x10,
++	0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08,
++	0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00
++};
++
++/*
++ * Test digests from the Skein spec, Appendix C.
++ */
++const uint8_t	skein_256_test_digests[][32] = {
++	{
++		/* for test_msg0 */
++		0x0B, 0x98, 0xDC, 0xD1, 0x98, 0xEA, 0x0E, 0x50,
++		0xA7, 0xA2, 0x44, 0xC4, 0x44, 0xE2, 0x5C, 0x23,
++		0xDA, 0x30, 0xC1, 0x0F, 0xC9, 0xA1, 0xF2, 0x70,
++		0xA6, 0x63, 0x7F, 0x1F, 0x34, 0xE6, 0x7E, 0xD2
++	},
++	{
++		/* for test_msg1 */
++		0x8D, 0x0F, 0xA4, 0xEF, 0x77, 0x7F, 0xD7, 0x59,
++		0xDF, 0xD4, 0x04, 0x4E, 0x6F, 0x6A, 0x5A, 0xC3,
++		0xC7, 0x74, 0xAE, 0xC9, 0x43, 0xDC, 0xFC, 0x07,
++		0x92, 0x7B, 0x72, 0x3B, 0x5D, 0xBF, 0x40, 0x8B
++	},
++	{
++		/* for test_msg2 */
++		0xDF, 0x28, 0xE9, 0x16, 0x63, 0x0D, 0x0B, 0x44,
++		0xC4, 0xA8, 0x49, 0xDC, 0x9A, 0x02, 0xF0, 0x7A,
++		0x07, 0xCB, 0x30, 0xF7, 0x32, 0x31, 0x82, 0x56,
++		0xB1, 0x5D, 0x86, 0x5A, 0xC4, 0xAE, 0x16, 0x2F
++	}
++	/* no test digests for test_msg3 and test_msg4 */
++};
++
++const uint8_t	skein_512_test_digests[][64] = {
++	{
++		/* for test_msg0 */
++		0x71, 0xB7, 0xBC, 0xE6, 0xFE, 0x64, 0x52, 0x22,
++		0x7B, 0x9C, 0xED, 0x60, 0x14, 0x24, 0x9E, 0x5B,
++		0xF9, 0xA9, 0x75, 0x4C, 0x3A, 0xD6, 0x18, 0xCC,
++		0xC4, 0xE0, 0xAA, 0xE1, 0x6B, 0x31, 0x6C, 0xC8,
++		0xCA, 0x69, 0x8D, 0x86, 0x43, 0x07, 0xED, 0x3E,
++		0x80, 0xB6, 0xEF, 0x15, 0x70, 0x81, 0x2A, 0xC5,
++		0x27, 0x2D, 0xC4, 0x09, 0xB5, 0xA0, 0x12, 0xDF,
++		0x2A, 0x57, 0x91, 0x02, 0xF3, 0x40, 0x61, 0x7A
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* for test_msg2 */
++		0x45, 0x86, 0x3B, 0xA3, 0xBE, 0x0C, 0x4D, 0xFC,
++		0x27, 0xE7, 0x5D, 0x35, 0x84, 0x96, 0xF4, 0xAC,
++		0x9A, 0x73, 0x6A, 0x50, 0x5D, 0x93, 0x13, 0xB4,
++		0x2B, 0x2F, 0x5E, 0xAD, 0xA7, 0x9F, 0xC1, 0x7F,
++		0x63, 0x86, 0x1E, 0x94, 0x7A, 0xFB, 0x1D, 0x05,
++		0x6A, 0xA1, 0x99, 0x57, 0x5A, 0xD3, 0xF8, 0xC9,
++		0xA3, 0xCC, 0x17, 0x80, 0xB5, 0xE5, 0xFA, 0x4C,
++		0xAE, 0x05, 0x0E, 0x98, 0x98, 0x76, 0x62, 0x5B
++	},
++	{
++		/* for test_msg3 */
++		0x91, 0xCC, 0xA5, 0x10, 0xC2, 0x63, 0xC4, 0xDD,
++		0xD0, 0x10, 0x53, 0x0A, 0x33, 0x07, 0x33, 0x09,
++		0x62, 0x86, 0x31, 0xF3, 0x08, 0x74, 0x7E, 0x1B,
++		0xCB, 0xAA, 0x90, 0xE4, 0x51, 0xCA, 0xB9, 0x2E,
++		0x51, 0x88, 0x08, 0x7A, 0xF4, 0x18, 0x87, 0x73,
++		0xA3, 0x32, 0x30, 0x3E, 0x66, 0x67, 0xA7, 0xA2,
++		0x10, 0x85, 0x6F, 0x74, 0x21, 0x39, 0x00, 0x00,
++		0x71, 0xF4, 0x8E, 0x8B, 0xA2, 0xA5, 0xAD, 0xB7
++	}
++	/* no test digests for test_msg4 */
++};
++
++const uint8_t	skein_1024_test_digests[][128] = {
++	{
++		/* for test_msg0 */
++		0xE6, 0x2C, 0x05, 0x80, 0x2E, 0xA0, 0x15, 0x24,
++		0x07, 0xCD, 0xD8, 0x78, 0x7F, 0xDA, 0x9E, 0x35,
++		0x70, 0x3D, 0xE8, 0x62, 0xA4, 0xFB, 0xC1, 0x19,
++		0xCF, 0xF8, 0x59, 0x0A, 0xFE, 0x79, 0x25, 0x0B,
++		0xCC, 0xC8, 0xB3, 0xFA, 0xF1, 0xBD, 0x24, 0x22,
++		0xAB, 0x5C, 0x0D, 0x26, 0x3F, 0xB2, 0xF8, 0xAF,
++		0xB3, 0xF7, 0x96, 0xF0, 0x48, 0x00, 0x03, 0x81,
++		0x53, 0x1B, 0x6F, 0x00, 0xD8, 0x51, 0x61, 0xBC,
++		0x0F, 0xFF, 0x4B, 0xEF, 0x24, 0x86, 0xB1, 0xEB,
++		0xCD, 0x37, 0x73, 0xFA, 0xBF, 0x50, 0xAD, 0x4A,
++		0xD5, 0x63, 0x9A, 0xF9, 0x04, 0x0E, 0x3F, 0x29,
++		0xC6, 0xC9, 0x31, 0x30, 0x1B, 0xF7, 0x98, 0x32,
++		0xE9, 0xDA, 0x09, 0x85, 0x7E, 0x83, 0x1E, 0x82,
++		0xEF, 0x8B, 0x46, 0x91, 0xC2, 0x35, 0x65, 0x65,
++		0x15, 0xD4, 0x37, 0xD2, 0xBD, 0xA3, 0x3B, 0xCE,
++		0xC0, 0x01, 0xC6, 0x7F, 0xFD, 0xE1, 0x5B, 0xA8
++	},
++	{
++		/* no test vector for test_msg1 */
++		NULL
++	},
++	{
++		/* no test vector for test_msg2 */
++		NULL
++	},
++	{
++		/* for test_msg3 */
++		0x1F, 0x3E, 0x02, 0xC4, 0x6F, 0xB8, 0x0A, 0x3F,
++		0xCD, 0x2D, 0xFB, 0xBC, 0x7C, 0x17, 0x38, 0x00,
++		0xB4, 0x0C, 0x60, 0xC2, 0x35, 0x4A, 0xF5, 0x51,
++		0x18, 0x9E, 0xBF, 0x43, 0x3C, 0x3D, 0x85, 0xF9,
++		0xFF, 0x18, 0x03, 0xE6, 0xD9, 0x20, 0x49, 0x31,
++		0x79, 0xED, 0x7A, 0xE7, 0xFC, 0xE6, 0x9C, 0x35,
++		0x81, 0xA5, 0xA2, 0xF8, 0x2D, 0x3E, 0x0C, 0x7A,
++		0x29, 0x55, 0x74, 0xD0, 0xCD, 0x7D, 0x21, 0x7C,
++		0x48, 0x4D, 0x2F, 0x63, 0x13, 0xD5, 0x9A, 0x77,
++		0x18, 0xEA, 0xD0, 0x7D, 0x07, 0x29, 0xC2, 0x48,
++		0x51, 0xD7, 0xE7, 0xD2, 0x49, 0x1B, 0x90, 0x2D,
++		0x48, 0x91, 0x94, 0xE6, 0xB7, 0xD3, 0x69, 0xDB,
++		0x0A, 0xB7, 0xAA, 0x10, 0x6F, 0x0E, 0xE0, 0xA3,
++		0x9A, 0x42, 0xEF, 0xC5, 0x4F, 0x18, 0xD9, 0x37,
++		0x76, 0x08, 0x09, 0x85, 0xF9, 0x07, 0x57, 0x4F,
++		0x99, 0x5E, 0xC6, 0xA3, 0x71, 0x53, 0xA5, 0x78
++	},
++	{
++		/* for test_msg4 */
++		0x84, 0x2A, 0x53, 0xC9, 0x9C, 0x12, 0xB0, 0xCF,
++		0x80, 0xCF, 0x69, 0x49, 0x1B, 0xE5, 0xE2, 0xF7,
++		0x51, 0x5D, 0xE8, 0x73, 0x3B, 0x6E, 0xA9, 0x42,
++		0x2D, 0xFD, 0x67, 0x66, 0x65, 0xB5, 0xFA, 0x42,
++		0xFF, 0xB3, 0xA9, 0xC4, 0x8C, 0x21, 0x77, 0x77,
++		0x95, 0x08, 0x48, 0xCE, 0xCD, 0xB4, 0x8F, 0x64,
++		0x0F, 0x81, 0xFB, 0x92, 0xBE, 0xF6, 0xF8, 0x8F,
++		0x7A, 0x85, 0xC1, 0xF7, 0xCD, 0x14, 0x46, 0xC9,
++		0x16, 0x1C, 0x0A, 0xFE, 0x8F, 0x25, 0xAE, 0x44,
++		0x4F, 0x40, 0xD3, 0x68, 0x00, 0x81, 0xC3, 0x5A,
++		0xA4, 0x3F, 0x64, 0x0F, 0xD5, 0xFA, 0x3C, 0x3C,
++		0x03, 0x0B, 0xCC, 0x06, 0xAB, 0xAC, 0x01, 0xD0,
++		0x98, 0xBC, 0xC9, 0x84, 0xEB, 0xD8, 0x32, 0x27,
++		0x12, 0x92, 0x1E, 0x00, 0xB1, 0xBA, 0x07, 0xD6,
++		0xD0, 0x1F, 0x26, 0x90, 0x70, 0x50, 0x25, 0x5E,
++		0xF2, 0xC8, 0xE2, 0x4F, 0x71, 0x6C, 0x52, 0xA5
++	}
++};
++
++int
++main(int argc, char *argv[])
++{
++	boolean_t	failed = B_FALSE;
++	uint64_t	cpu_mhz = 0;
++
++	if (argc == 2)
++		cpu_mhz = atoi(argv[1]);
++
++#define	SKEIN_ALGO_TEST(_m, mode, diglen, testdigest)			\
++	do {								\
++		Skein ## mode ## _Ctxt_t	ctx;			\
++		uint8_t				digest[diglen / 8];	\
++		(void) Skein ## mode ## _Init(&ctx, diglen);		\
++		(void) Skein ## mode ## _Update(&ctx, _m, sizeof (_m));	\
++		(void) Skein ## mode ## _Final(&ctx, digest);		\
++		(void) printf("Skein" #mode "/" #diglen			\
++		    "\tMessage: " #_m "\tResult: ");			\
++		if (bcmp(digest, testdigest, diglen / 8) == 0) {	\
++			(void) printf("OK\n");				\
++		} else {						\
++			(void) printf("FAILED!\n");			\
++			failed = B_TRUE;				\
++		}							\
++		NOTE(CONSTCOND)						\
++	} while (0)
++
++#define	SKEIN_PERF_TEST(mode, diglen)					\
++	do {								\
++		Skein ## mode ## _Ctxt_t ctx;				\
++		uint8_t		digest[diglen / 8];			\
++		uint8_t		block[131072];				\
++		uint64_t	delta;					\
++		double		cpb = 0;				\
++		int		i;					\
++		struct timeval	start, end;				\
++		bzero(block, sizeof (block));				\
++		(void) gettimeofday(&start, NULL);			\
++		(void) Skein ## mode ## _Init(&ctx, diglen);		\
++		for (i = 0; i < 8192; i++) {				\
++			(void) Skein ## mode ## _Update(&ctx, block,	\
++			    sizeof (block));				\
++		}							\
++		(void) Skein ## mode ## _Final(&ctx, digest);		\
++		(void) gettimeofday(&end, NULL);			\
++		delta = (end.tv_sec * 1000000llu + end.tv_usec) -	\
++		    (start.tv_sec * 1000000llu + start.tv_usec);	\
++		if (cpu_mhz != 0) {					\
++			cpb = (cpu_mhz * 1e6 * ((double)delta /		\
++			    1000000)) / (8192 * 128 * 1024);		\
++		}							\
++		(void) printf("Skein" #mode "/" #diglen "\t%llu us "	\
++		    "(%.02f CPB)\n", (u_longlong_t)delta, cpb);		\
++		NOTE(CONSTCOND)						\
++	} while (0)
++
++	(void) printf("Running algorithm correctness tests:\n");
++	SKEIN_ALGO_TEST(test_msg0, _256, 256, skein_256_test_digests[0]);
++	SKEIN_ALGO_TEST(test_msg1, _256, 256, skein_256_test_digests[1]);
++	SKEIN_ALGO_TEST(test_msg2, _256, 256, skein_256_test_digests[2]);
++	SKEIN_ALGO_TEST(test_msg0, _512, 512, skein_512_test_digests[0]);
++	SKEIN_ALGO_TEST(test_msg2, _512, 512, skein_512_test_digests[2]);
++	SKEIN_ALGO_TEST(test_msg3, _512, 512, skein_512_test_digests[3]);
++	SKEIN_ALGO_TEST(test_msg0, 1024, 1024, skein_1024_test_digests[0]);
++	SKEIN_ALGO_TEST(test_msg3, 1024, 1024, skein_1024_test_digests[3]);
++	SKEIN_ALGO_TEST(test_msg4, 1024, 1024, skein_1024_test_digests[4]);
++	if (failed)
++		return (1);
++
++	(void) printf("Running performance tests (hashing 1024 MiB of "
++	    "data):\n");
++	SKEIN_PERF_TEST(_256, 256);
++	SKEIN_PERF_TEST(_512, 512);
++	SKEIN_PERF_TEST(1024, 1024);
++
++	return (0);
++}
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/skein/sparc/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/skein/sparc/Makefile
+new file mode 100644
+index 0000000..220481c
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/skein/sparc/Makefile
+@@ -0,0 +1,19 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=skein_test
++include ../../Makefile.subdirs
++
++install: all $(CMD32)
+diff --git a/usr/src/test/zfs-tests/tests/functional/checksum/skein/sparcv9/Makefile b/usr/src/test/zfs-tests/tests/functional/checksum/skein/sparcv9/Makefile
+new file mode 100644
+index 0000000..c2f6093
+--- /dev/null
++++ b/usr/src/test/zfs-tests/tests/functional/checksum/skein/sparcv9/Makefile
+@@ -0,0 +1,20 @@
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2015 by Delphix. All rights reserved.
++#
++
++PROG=skein_test
++include ../../Makefile.subdirs
++include $(SRC)/cmd/Makefile.cmd.64
++
++install: all $(CMD64)
+
+-- 
+1.8.3.1
