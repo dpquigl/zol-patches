@@ -1,0 +1,3641 @@
+From dbb1b606b4fe6d4b6d630c697bf5dab265a13c0f Mon Sep 17 00:00:00 2001
+From: Dan Kimmel <dan.kimmel@delphix.com>
+Date: Sun, 18 Oct 2015 10:05:17 -0700
+Subject: [PATCH] DLPX-40252 integrate EP-476 compressed zfs send/receive
+
+---
+ usr/src/cmd/zfs/zfs_main.c                   |  10 +-
+ usr/src/cmd/zstreamdump/zstreamdump.c        |  30 +-
+ usr/src/lib/libzfs/common/libzfs.h           |   3 +
+ usr/src/lib/libzfs/common/libzfs_sendrecv.c  |  51 +-
+ usr/src/lib/libzfs_core/common/libzfs_core.c |  11 +-
+ usr/src/lib/libzfs_core/common/libzfs_core.h |   5 +-
+ usr/src/man/man1m/zfs.1m                     |  44 +-
+ usr/src/uts/common/fs/zfs/arc.c              | 791 +++++++++++++++++----------
+ usr/src/uts/common/fs/zfs/dbuf.c             | 177 +++---
+ usr/src/uts/common/fs/zfs/dmu.c              |  47 +-
+ usr/src/uts/common/fs/zfs/dmu_objset.c       |  11 +-
+ usr/src/uts/common/fs/zfs/dmu_send.c         | 246 ++++++---
+ usr/src/uts/common/fs/zfs/dsl_dataset.c      |   8 +
+ usr/src/uts/common/fs/zfs/sys/arc.h          |  20 +-
+ usr/src/uts/common/fs/zfs/sys/dmu.h          |   3 +-
+ usr/src/uts/common/fs/zfs/sys/dmu_send.h     |  13 +-
+ usr/src/uts/common/fs/zfs/sys/dsl_dataset.h  |   2 +
+ usr/src/uts/common/fs/zfs/sys/refcount.h     |   2 +-
+ usr/src/uts/common/fs/zfs/sys/zfs_ioctl.h    |  27 +-
+ usr/src/uts/common/fs/zfs/sys/zio.h          |  30 +-
+ usr/src/uts/common/fs/zfs/sys/zio_compress.h |  23 +-
+ usr/src/uts/common/fs/zfs/zfs_ioctl.c        |  36 +-
+ usr/src/uts/common/fs/zfs/zio.c              |  95 ++--
+ 23 files changed, 1100 insertions(+), 585 deletions(-)
+
+diff --git a/usr/src/cmd/zfs/zfs_main.c b/usr/src/cmd/zfs/zfs_main.c
+index 35b34bf..4e38b69 100644
+--- a/usr/src/cmd/zfs/zfs_main.c
++++ b/usr/src/cmd/zfs/zfs_main.c
+@@ -268,7 +268,7 @@ get_usage(zfs_help_t idx)
+ 	case HELP_ROLLBACK:
+ 		return (gettext("\trollback [-rRf] <snapshot>\n"));
+ 	case HELP_SEND:
+-		return (gettext("\tsend [-DnPpRbvLe] [-[iI] snapshot] "
++		return (gettext("\tsend [-DnPpRbvLec] [-[iI] snapshot] "
+ 		    "<snapshot>\n"
+ 		    "\tsend [-Le] [-i snapshot|bookmark] "
+ 		    "<filesystem|volume|snapshot>\n"
+@@ -3737,11 +3737,12 @@ zfs_do_send(int argc, char **argv)
+ 		{"large-block",	no_argument,		NULL, 'L'},
+ 		{"embed",	no_argument,		NULL, 'e'},
+ 		{"resume",	required_argument,	NULL, 't'},
++		{"compressed",	no_argument,		NULL, 'c'},
+ 		{0, 0, 0, 0}
+ 	};
+ 
+ 	/* check options */
+-	while ((c = getopt_long(argc, argv, ":i:I:RbDpvnPLet:", long_options,
++	while ((c = getopt_long(argc, argv, ":i:I:RbDpvnPLet:c", long_options,
+ 	    NULL)) != -1) {
+ 		switch (c) {
+ 		case 'i':
+@@ -3794,6 +3795,9 @@ zfs_do_send(int argc, char **argv)
+ 		case 't':
+ 			resume_token = optarg;
+ 			break;
++		case 'c':
++			flags.compress = B_TRUE;
++			break;
+ 		case ':':
+ 			(void) fprintf(stderr, gettext("missing argument for "
+ 			    "'%c' option\n"), optopt);
+@@ -3905,6 +3909,8 @@ zfs_do_send(int argc, char **argv)
+ 			lzc_flags |= LZC_SEND_FLAG_LARGE_BLOCK;
+ 		if (flags.embed_data)
+ 			lzc_flags |= LZC_SEND_FLAG_EMBED_DATA;
++		if (flags.compress)
++			lzc_flags |= LZC_SEND_FLAG_COMPRESS;
+ 
+ 		if (fromname != NULL &&
+ 		    (fromname[0] == '#' || fromname[0] == '@')) {
+diff --git a/usr/src/cmd/zstreamdump/zstreamdump.c b/usr/src/cmd/zstreamdump/zstreamdump.c
+index 83a5b54..15a005e 100644
+--- a/usr/src/cmd/zstreamdump/zstreamdump.c
++++ b/usr/src/cmd/zstreamdump/zstreamdump.c
+@@ -25,7 +25,7 @@
+  */
+ 
+ /*
+- * Copyright (c) 2013, 2014 by Delphix. All rights reserved.
++ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
+  */
+ 
+ #include <ctype.h>
+@@ -38,6 +38,7 @@
+ 
+ #include <sys/dmu.h>
+ #include <sys/zfs_ioctl.h>
++#include <sys/zio.h>
+ #include <zfs_fletcher.h>
+ 
+ /*
+@@ -250,6 +251,7 @@ main(int argc, char *argv[])
+ 			(void) fprintf(stderr, "invalid option '%c'\n",
+ 			    optopt);
+ 			usage();
++			break;
+ 		}
+ 	}
+ 
+@@ -452,38 +454,50 @@ main(int argc, char *argv[])
+ 				drrw->drr_object = BSWAP_64(drrw->drr_object);
+ 				drrw->drr_type = BSWAP_32(drrw->drr_type);
+ 				drrw->drr_offset = BSWAP_64(drrw->drr_offset);
+-				drrw->drr_length = BSWAP_64(drrw->drr_length);
++				drrw->drr_logical_size =
++				    BSWAP_64(drrw->drr_logical_size);
+ 				drrw->drr_toguid = BSWAP_64(drrw->drr_toguid);
+ 				drrw->drr_key.ddk_prop =
+ 				    BSWAP_64(drrw->drr_key.ddk_prop);
++				drrw->drr_compressed_size =
++				    BSWAP_64(drrw->drr_compressed_size);
+ 			}
++
++			uint64_t payload_size = DRR_WRITE_PAYLOAD_SIZE(drrw);
++
+ 			/*
+ 			 * If this is verbose and/or dump output,
+ 			 * print info on the modified block
+ 			 */
+ 			if (verbose) {
+ 				(void) printf("WRITE object = %llu type = %u "
+-				    "checksum type = %u\n"
+-				    "    offset = %llu length = %llu "
++				    "checksum type = %u compression type = %u\n"
++				    "    offset = %llu logical_size = %llu "
++				    "compressed_size = %llu "
++				    "payload_size = %llu "
+ 				    "props = %llx\n",
+ 				    (u_longlong_t)drrw->drr_object,
+ 				    drrw->drr_type,
+ 				    drrw->drr_checksumtype,
++				    drrw->drr_compressiontype,
+ 				    (u_longlong_t)drrw->drr_offset,
+-				    (u_longlong_t)drrw->drr_length,
++				    (u_longlong_t)drrw->drr_logical_size,
++				    (u_longlong_t)drrw->drr_compressed_size,
++				    (u_longlong_t)payload_size,
+ 				    (u_longlong_t)drrw->drr_key.ddk_prop);
+ 			}
++
+ 			/*
+ 			 * Read the contents of the block in from STDIN to buf
+ 			 */
+-			(void) ssread(buf, drrw->drr_length, &zc);
++			(void) ssread(buf, payload_size, &zc);
+ 			/*
+ 			 * If in dump mode
+ 			 */
+ 			if (dump) {
+-				print_block(buf, drrw->drr_length);
++				print_block(buf, payload_size);
+ 			}
+-			total_write_size += drrw->drr_length;
++			total_write_size += payload_size;
+ 			break;
+ 
+ 		case DRR_WRITE_BYREF:
+diff --git a/usr/src/lib/libzfs/common/libzfs.h b/usr/src/lib/libzfs/common/libzfs.h
+index 5508816..34b08d1 100644
+--- a/usr/src/lib/libzfs/common/libzfs.h
++++ b/usr/src/lib/libzfs/common/libzfs.h
+@@ -602,6 +602,9 @@ typedef struct sendflags {
+ 
+ 	/* WRITE_EMBEDDED records of type DATA are permitted */
+ 	boolean_t embed_data;
++
++	/* compressed WRITE records are permitted */
++	boolean_t compress;
+ } sendflags_t;
+ 
+ typedef boolean_t (snapfilter_cb_t)(zfs_handle_t *, void *);
+diff --git a/usr/src/lib/libzfs/common/libzfs_sendrecv.c b/usr/src/lib/libzfs/common/libzfs_sendrecv.c
+index 8304947..899bb33 100644
+--- a/usr/src/lib/libzfs/common/libzfs_sendrecv.c
++++ b/usr/src/lib/libzfs/common/libzfs_sendrecv.c
+@@ -347,8 +347,10 @@ cksummer(void *arg)
+ 		{
+ 			struct drr_write *drrw = &drr->drr_u.drr_write;
+ 			dataref_t	dataref;
++			uint64_t	payload_size;
+ 
+-			(void) ssread(buf, drrw->drr_length, ofp);
++			payload_size = DRR_WRITE_PAYLOAD_SIZE(drrw);
++			(void) ssread(buf, payload_size, ofp);
+ 
+ 			/*
+ 			 * Use the existing checksum if it's dedup-capable,
+@@ -362,7 +364,7 @@ cksummer(void *arg)
+ 				zio_cksum_t	tmpsha256;
+ 
+ 				SHA256Init(&ctx);
+-				SHA256Update(&ctx, buf, drrw->drr_length);
++				SHA256Update(&ctx, buf, payload_size);
+ 				SHA256Final(&tmpsha256, &ctx);
+ 				drrw->drr_key.ddk_cksum.zc_word[0] =
+ 				    BE_64(tmpsha256.zc_word[0]);
+@@ -392,7 +394,7 @@ cksummer(void *arg)
+ 
+ 				wbr_drrr->drr_object = drrw->drr_object;
+ 				wbr_drrr->drr_offset = drrw->drr_offset;
+-				wbr_drrr->drr_length = drrw->drr_length;
++				wbr_drrr->drr_length = drrw->drr_logical_size;
+ 				wbr_drrr->drr_toguid = drrw->drr_toguid;
+ 				wbr_drrr->drr_refguid = dataref.ref_guid;
+ 				wbr_drrr->drr_refobject =
+@@ -414,7 +416,7 @@ cksummer(void *arg)
+ 					goto out;
+ 			} else {
+ 				/* block not previously seen */
+-				if (dump_record(drr, buf, drrw->drr_length,
++				if (dump_record(drr, buf, payload_size,
+ 				    &stream_cksum, outfd) != 0)
+ 					goto out;
+ 			}
+@@ -816,7 +818,7 @@ typedef struct send_dump_data {
+ 	uint64_t prevsnap_obj;
+ 	boolean_t seenfrom, seento, replicate, doall, fromorigin;
+ 	boolean_t verbose, dryrun, parsable, progress, embed_data, std_out;
+-	boolean_t large_block;
++	boolean_t large_block, compress;
+ 	int outfd;
+ 	boolean_t err;
+ 	nvlist_t *fss;
+@@ -832,7 +834,7 @@ typedef struct send_dump_data {
+ 
+ static int
+ estimate_ioctl(zfs_handle_t *zhp, uint64_t fromsnap_obj,
+-    boolean_t fromorigin, uint64_t *sizep)
++    boolean_t fromorigin, enum lzc_send_flags flags, uint64_t *sizep)
+ {
+ 	zfs_cmd_t zc = { 0 };
+ 	libzfs_handle_t *hdl = zhp->zfs_hdl;
+@@ -845,6 +847,7 @@ estimate_ioctl(zfs_handle_t *zhp, uint64_t fromsnap_obj,
+ 	zc.zc_sendobj = zfs_prop_get_int(zhp, ZFS_PROP_OBJSETID);
+ 	zc.zc_fromobj = fromsnap_obj;
+ 	zc.zc_guid = 1;  /* estimate flag */
++	zc.zc_flags = flags;
+ 
+ 	if (zfs_ioctl(zhp->zfs_hdl, ZFS_IOC_SEND, &zc) != 0) {
+ 		char errbuf[1024];
+@@ -1083,6 +1086,7 @@ dump_snapshot(zfs_handle_t *zhp, void *arg)
+ 	progress_arg_t pa = { 0 };
+ 	pthread_t tid;
+ 	char *thissnap;
++	enum lzc_send_flags flags = 0;
+ 	int err;
+ 	boolean_t isfromsnap, istosnap, fromorigin;
+ 	boolean_t exclude = B_FALSE;
+@@ -1111,6 +1115,13 @@ dump_snapshot(zfs_handle_t *zhp, void *arg)
+ 	if (istosnap)
+ 		sdd->seento = B_TRUE;
+ 
++	if (sdd->large_block)
++		flags |= LZC_SEND_FLAG_LARGE_BLOCK;
++	if (sdd->embed_data)
++		flags |= LZC_SEND_FLAG_EMBED_DATA;
++	if (sdd->compress)
++		flags |= LZC_SEND_FLAG_COMPRESS;
++
+ 	if (!sdd->doall && !isfromsnap && !istosnap) {
+ 		if (sdd->replicate) {
+ 			char *snapname;
+@@ -1157,7 +1168,7 @@ dump_snapshot(zfs_handle_t *zhp, void *arg)
+ 	if (sdd->verbose) {
+ 		uint64_t size = 0;
+ 		(void) estimate_ioctl(zhp, sdd->prevsnap_obj,
+-		    fromorigin, &size);
++		    fromorigin, flags, &size);
+ 
+ 		send_print_verbose(fout, zhp->zfs_name,
+ 		    sdd->prevsnap[0] ? sdd->prevsnap : NULL,
+@@ -1182,12 +1193,6 @@ dump_snapshot(zfs_handle_t *zhp, void *arg)
+ 			}
+ 		}
+ 
+-		enum lzc_send_flags flags = 0;
+-		if (sdd->large_block)
+-			flags |= LZC_SEND_FLAG_LARGE_BLOCK;
+-		if (sdd->embed_data)
+-			flags |= LZC_SEND_FLAG_EMBED_DATA;
+-
+ 		err = dump_ioctl(zhp, sdd->prevsnap, sdd->prevsnap_obj,
+ 		    fromorigin, sdd->outfd, flags, sdd->debugnv);
+ 
+@@ -1496,8 +1501,12 @@ zfs_send_resume(libzfs_handle_t *hdl, sendflags_t *flags, int outfd,
+ 	fromguid = 0;
+ 	(void) nvlist_lookup_uint64(resume_nvl, "fromguid", &fromguid);
+ 
++	if (flags->largeblock || nvlist_exists(resume_nvl, "largeblockok"))
++		lzc_flags |= LZC_SEND_FLAG_LARGE_BLOCK;
+ 	if (flags->embed_data || nvlist_exists(resume_nvl, "embedok"))
+ 		lzc_flags |= LZC_SEND_FLAG_EMBED_DATA;
++	if (flags->compress || nvlist_exists(resume_nvl, "compressok"))
++		lzc_flags |= LZC_SEND_FLAG_COMPRESS;
+ 
+ 	if (guid_to_name(hdl, toname, toguid, B_FALSE, name) != 0) {
+ 		if (zfs_dataset_exists(hdl, toname, ZFS_TYPE_DATASET)) {
+@@ -1570,7 +1579,8 @@ zfs_send_resume(libzfs_handle_t *hdl, sendflags_t *flags, int outfd,
+ 
+ 	if (flags->verbose) {
+ 		uint64_t size = 0;
+-		error = lzc_send_space(zhp->zfs_name, fromname, &size);
++		error = lzc_send_space(zhp->zfs_name, fromname,
++		    lzc_flags, &size);
+ 		if (error == 0)
+ 			size = MAX(0, (int64_t)(size - bytes));
+ 		send_print_verbose(stderr, zhp->zfs_name, fromname,
+@@ -1806,6 +1816,7 @@ zfs_send(zfs_handle_t *zhp, const char *fromsnap, const char *tosnap,
+ 	sdd.dryrun = flags->dryrun;
+ 	sdd.large_block = flags->largeblock;
+ 	sdd.embed_data = flags->embed_data;
++	sdd.compress = flags->compress;
+ 	sdd.filter_cb = filter_func;
+ 	sdd.filter_cb_arg = cb_arg;
+ 	if (debugnvp)
+@@ -2931,11 +2942,17 @@ recv_skip(libzfs_handle_t *hdl, int fd, boolean_t byteswap)
+ 
+ 		case DRR_WRITE:
+ 			if (byteswap) {
+-				drr->drr_u.drr_write.drr_length =
+-				    BSWAP_64(drr->drr_u.drr_write.drr_length);
++				drr->drr_u.drr_write.drr_logical_size =
++				    BSWAP_64(
++				    drr->drr_u.drr_write.drr_logical_size);
++				drr->drr_u.drr_write.drr_compressed_size =
++				    BSWAP_64(
++				    drr->drr_u.drr_write.drr_compressed_size);
+ 			}
++			uint64_t payload_size =
++			    DRR_WRITE_PAYLOAD_SIZE(&drr->drr_u.drr_write);
+ 			(void) recv_read(hdl, fd, buf,
+-			    drr->drr_u.drr_write.drr_length, B_FALSE, NULL);
++			    payload_size, B_FALSE, NULL);
+ 			break;
+ 		case DRR_SPILL:
+ 			if (byteswap) {
+diff --git a/usr/src/lib/libzfs_core/common/libzfs_core.c b/usr/src/lib/libzfs_core/common/libzfs_core.c
+index 0010298..fd95964 100644
+--- a/usr/src/lib/libzfs_core/common/libzfs_core.c
++++ b/usr/src/lib/libzfs_core/common/libzfs_core.c
+@@ -529,6 +529,8 @@ lzc_send_resume_redacted(const char *snapname, const char *from, int fd,
+ 		fnvlist_add_boolean(args, "largeblockok");
+ 	if (flags & LZC_SEND_FLAG_EMBED_DATA)
+ 		fnvlist_add_boolean(args, "embedok");
++	if (flags & LZC_SEND_FLAG_COMPRESS)
++		fnvlist_add_boolean(args, "compressok");
+ 	if (resumeobj != 0 || resumeoff != 0) {
+ 		fnvlist_add_uint64(args, "resume_object", resumeobj);
+ 		fnvlist_add_uint64(args, "resume_offset", resumeoff);
+@@ -554,7 +556,8 @@ lzc_send_resume_redacted(const char *snapname, const char *from, int fd,
+  * an equivalent snapshot.
+  */
+ int
+-lzc_send_space(const char *snapname, const char *from, uint64_t *spacep)
++lzc_send_space(const char *snapname, const char *from,
++    enum lzc_send_flags flags, uint64_t *spacep)
+ {
+ 	nvlist_t *args;
+ 	nvlist_t *result;
+@@ -563,6 +566,12 @@ lzc_send_space(const char *snapname, const char *from, uint64_t *spacep)
+ 	args = fnvlist_alloc();
+ 	if (from != NULL)
+ 		fnvlist_add_string(args, "from", from);
++	if (flags & LZC_SEND_FLAG_LARGE_BLOCK)
++		fnvlist_add_boolean(args, "largeblockok");
++	if (flags & LZC_SEND_FLAG_EMBED_DATA)
++		fnvlist_add_boolean(args, "embedok");
++	if (flags & LZC_SEND_FLAG_COMPRESS)
++		fnvlist_add_boolean(args, "compressok");
+ 	err = lzc_ioctl(ZFS_IOC_SEND_SPACE, snapname, args, &result);
+ 	nvlist_free(args);
+ 	if (err == 0)
+diff --git a/usr/src/lib/libzfs_core/common/libzfs_core.h b/usr/src/lib/libzfs_core/common/libzfs_core.h
+index d6e793d..76ad8ef 100644
+--- a/usr/src/lib/libzfs_core/common/libzfs_core.h
++++ b/usr/src/lib/libzfs_core/common/libzfs_core.h
+@@ -55,7 +55,8 @@ int lzc_get_holds(const char *, nvlist_t **);
+ 
+ enum lzc_send_flags {
+ 	LZC_SEND_FLAG_EMBED_DATA = 1 << 0,
+-	LZC_SEND_FLAG_LARGE_BLOCK = 1 << 1
++	LZC_SEND_FLAG_LARGE_BLOCK = 1 << 1,
++	LZC_SEND_FLAG_COMPRESS = 1 << 2
+ };
+ 
+ int lzc_send(const char *, const char *, int, enum lzc_send_flags);
+@@ -68,7 +69,7 @@ int lzc_send_resume_redacted(const char *, const char *, int,
+ int lzc_receive(const char *, nvlist_t *, const char *, boolean_t, int);
+ int lzc_receive_resumable(const char *, nvlist_t *, const char *,
+     boolean_t, int);
+-int lzc_send_space(const char *, const char *, uint64_t *);
++int lzc_send_space(const char *, const char *, enum lzc_send_flags, uint64_t *);
+ 
+ boolean_t lzc_exists(const char *);
+ 
+diff --git a/usr/src/man/man1m/zfs.1m b/usr/src/man/man1m/zfs.1m
+index a0f5683..1663e7a 100644
+--- a/usr/src/man/man1m/zfs.1m
++++ b/usr/src/man/man1m/zfs.1m
+@@ -181,7 +181,7 @@ zfs \- configures ZFS file systems
+ 
+ .LP
+ .nf
+-\fBzfs\fR \fBsend\fR [\fB-DnPpRveL\fR] [\fB-\fR[\fBiI\fR] \fIsnapshot\fR] \fIsnapshot\fR
++\fBzfs\fR \fBsend\fR [\fB-DnPpRveLc\fR] [\fB-\fR[\fBiI\fR] \fIsnapshot\fR] \fIsnapshot\fR
+ .fi
+ 
+ .LP
+@@ -3005,7 +3005,7 @@ See \fBzpool-features\fR(5) for details on ZFS feature flags and the
+ .sp
+ .ne 2
+ .na
+-\fBzfs send\fR [\fB-DnPpRveL\fR] [\fB-\fR[\fBiI\fR] \fIsnapshot\fR] \fIsnapshot\fR
++\fBzfs send\fR [\fB-DnPpRveLc\fR] [\fB-\fR[\fBiI\fR] \fIsnapshot\fR] \fIsnapshot\fR
+ .ad
+ .sp .6
+ .RS 4n
+@@ -3072,7 +3072,7 @@ snapshots and file systems that do not exist on the sending side are destroyed.
+ .RS 4n
+ Generate a deduplicated stream.  Blocks which would have been sent multiple
+ times in the send stream will only be sent once.  The receiving system must
+-also support this feature to recieve a deduplicated stream.  This flag can
++also support this feature to receive a deduplicated stream.  This flag can
+ be used regardless of the dataset's \fBdedup\fR property, but performance
+ will be much better if the filesystem uses a dedup-capable checksum (e.g.
+ \fBsha256\fR).
+@@ -3113,6 +3113,22 @@ then the receiving system must have that feature enabled as well. See
+ .sp
+ .ne 2
+ .na
++\fB\fB-c\fR, \fB--compressed\fR\fR
++.ad
++.sp .6
++.RS 4n
++Generate a more compact stream by using compressed WRITE records for blocks
++which are compressed on disk and in memory (see the \fBcompression\fR property
++for details).  If the \fBlz4_compress\fR feature is active on the sending
++system, then the receiving system must have that feature enabled as well.  If
++the \fBlarge_blocks\fR feature is enabled on the sending system but the \fB-L\fR
++option is not supplied in conjunction with \fB-c\fR, then the data will be
++decompressed before sending so it can be split into smaller block sizes.
++.RE
++
++.sp
++.ne 2
++.na
+ \fB\fB-p\fR, \fB--props\fR\fR
+ .ad
+ .sp .6
+@@ -3161,7 +3177,7 @@ on future versions of \fBZFS\fR.
+ .sp
+ .ne 2
+ .na
+-\fBzfs\fR \fBsend\fR [\fB-eL\fR] [\fB[\fB-b\fR] -i \fIsnapshot\fR|\fIbookmark\fR]\fR \fIfilesystem\fR|\fIvolume\fR|\fIsnapshot\fR
++\fBzfs\fR \fBsend\fR [\fB-ecL\fR] [\fB[\fB-b\fR] -i \fIsnapshot\fR|\fIbookmark\fR]\fR \fIfilesystem\fR|\fIvolume\fR|\fIsnapshot\fR
+ .ad
+ .sp .6
+ .RS 4n
+@@ -3244,7 +3260,23 @@ then the receiving system must have that feature enabled as well. See
+ .sp
+ .ne 2
+ .na
+-\fBzfs\fR \fBsend\fR \fB--redact\fR ""|\fIsnapshot\fR[,\fIsnapshot\fR]... [\fB-PeL\fR] [\fB -i \fIredaction_bookmark\fR]\fR \fIsnapshot\fR
++\fB\fB-c\fR, \fB--compressed\fR\fR
++.ad
++.sp .6
++.RS 4n
++Generate a more compact stream by using compressed WRITE records for blocks
++which are compressed on disk and in memory (see the \fBcompression\fR property
++for details).  If the \fBlz4_compress\fR feature is active on the sending
++system, then the receiving system must have that feature enabled as well.  If
++the \fBlarge_blocks\fR feature is enabled on the sending system but the \fB-L\fR
++option is not supplied in conjunction with \fB-c\fR, then the data will be
++decompressed before sending so it can be split into smaller block sizes.
++.RE
++
++.sp
++.ne 2
++.na
++\fBzfs\fR \fBsend\fR \fB--redact\fR ""|\fIsnapshot\fR[,\fIsnapshot\fR]... [\fB-PecL\fR] [\fB -i \fIredaction_bookmark\fR]\fR \fIsnapshot\fR
+     \fIredaction_bookmark_name\fR
+ .ad
+ .sp .6
+@@ -3277,7 +3309,7 @@ When the redacted send stream is received, we will generate a redacted
+ snapshot.  Due to the nature of redaction, a redacted dataset can only
+ be used in the following ways:
+ .sp
+-1. To recieve, as a clone, an incremental send from the original snapshot to one
++1. To receive, as a clone, an incremental send from the original snapshot to one
+ of the snapshots it was redacted with respect to.  In this case, the stream
+ will produce a valid dataset when received because all blocks that
+ were redacted in the parent are guaranteed to be present in the child's send
+diff --git a/usr/src/uts/common/fs/zfs/arc.c b/usr/src/uts/common/fs/zfs/arc.c
+index d6bb278..0e818fd 100644
+--- a/usr/src/uts/common/fs/zfs/arc.c
++++ b/usr/src/uts/common/fs/zfs/arc.c
+@@ -77,10 +77,10 @@
+  * A new reference to a cache buffer can be obtained in two
+  * ways: 1) via a hash table lookup using the DVA as a key,
+  * or 2) via one of the ARC lists.  The arc_read() interface
+- * uses method 1, while the internal arc algorithms for
++ * uses method 1, while the internal ARC algorithms for
+  * adjusting the cache use method 2.  We therefore provide two
+  * types of locks: 1) the hash table lock array, and 2) the
+- * arc list locks.
++ * ARC list locks.
+  *
+  * Buffers do not have their own mutexes, rather they rely on the
+  * hash table mutexes for the bulk of their protection (i.e. most
+@@ -93,21 +93,12 @@
+  * buf_hash_remove() expects the appropriate hash mutex to be
+  * already held before it is invoked.
+  *
+- * Each arc state also has a mutex which is used to protect the
++ * Each ARC state also has a mutex which is used to protect the
+  * buffer list associated with the state.  When attempting to
+- * obtain a hash table lock while holding an arc list lock you
++ * obtain a hash table lock while holding an ARC list lock you
+  * must use: mutex_tryenter() to avoid deadlock.  Also note that
+  * the active state mutex must be held before the ghost state mutex.
+  *
+- * Arc buffers may have an associated eviction callback function.
+- * This function will be invoked prior to removing the buffer (e.g.
+- * in arc_do_user_evicts()).  Note however that the data associated
+- * with the buffer may be evicted prior to the callback.  The callback
+- * must be made with *no locks held* (to prevent deadlock).  Additionally,
+- * the users of callbacks must ensure that their private data is
+- * protected from simultaneous callbacks from arc_clear_callback()
+- * and arc_do_user_evicts().
+- *
+  * Note that the majority of the performance stats are manipulated
+  * with atomic operations.
+  *
+@@ -136,67 +127,81 @@
+  * are cached in the L1ARC. The L1ARC (l1arc_buf_hdr_t) is a structure within
+  * the arc_buf_hdr_t that will point to the data block in memory. A block can
+  * only be read by a consumer if it has an l1arc_buf_hdr_t. The L1ARC
+- * caches data in two ways -- in a list of arc buffers (arc_buf_t) and
++ * caches data in two ways -- in a list of ARC buffers (arc_buf_t) and
+  * also in the arc_buf_hdr_t's private physical data block pointer (b_pdata).
+- * Each arc buffer (arc_buf_t) is being actively accessed by a specific ARC
+- * consumer, and always contains uncompressed data. The ARC will provide
+- * references to this data and will keep it cached until it is no longer in
+- * use. Typically, the arc will try to cache only the L1ARC's physical data
+- * block and will aggressively evict any arc_buf_t that is no longer referenced.
+- * The amount of memory consumed by the arc_buf_t's can be seen via the
+- * "overhead_size" kstat.
+  *
+- *
+- *                arc_buf_hdr_t
+- *                +-----------+
+- *                |           |
+- *                |           |
+- *                |           |
+- *                +-----------+
+- * l2arc_buf_hdr_t|           |
+- *                |           |
+- *                +-----------+
+- * l1arc_buf_hdr_t|           |
+- *                |           |                 arc_buf_t
+- *                |    b_buf  +------------>+---------+      arc_buf_t
+- *                |           |             |b_next   +---->+---------+
+- *                |  b_pdata  +-+           |---------|     |b_next   +-->NULL
+- *                +-----------+ |           |         |     +---------+
+- *                              |           |b_data   +-+   |         |
+- *                              |           +---------+ |   |b_data   +-+
+- *                              +->+------+             |   +---------+ |
+- *                   (potentially) |      |             |               |
+- *                     compressed  |      |             |               |
+- *                        data     +------+             |               v
+- *                                                      +->+------+     +------+
+- *                                            uncompressed |      |     |      |
+- *                                                data     |      |     |      |
+- *                                                         +------+     +------+
+- *
+- * The L1ARC's data pointer, however, may or may not be uncompressed. The
+- * ARC has the ability to store the physical data (b_pdata) associated with
+- * the DVA of the arc_buf_hdr_t. Since the b_pdata is a copy of the on-disk
+- * physical block, it will match its on-disk compression characteristics.
+- * If the block on-disk is compressed, then the physical data block
+- * in the cache will also be compressed and vice-versa. This behavior
+- * can be disabled by setting 'zfs_compressed_arc_enabled' to B_FALSE. When the
++ * The L1ARC's data pointer may or may not be uncompressed. The ARC has the
++ * ability to store the physical data (b_pdata) associated with the DVA of the
++ * arc_buf_hdr_t. Since the b_pdata is a copy of the on-disk physical block,
++ * it will match its on-disk compression characteristics. This behavior can be
++ * disabled by setting 'zfs_compressed_arc_enabled' to B_FALSE. When the
+  * compressed ARC functionality is disabled, the b_pdata will point to an
+  * uncompressed version of the on-disk data.
+  *
++ * Data in the L1ARC is not accessed by consumers of the ARC directly. Each
++ * arc_buf_hdr_t can have multiple ARC buffers (arc_buf_t) which reference it.
++ * Each ARC buffer (arc_buf_t) is being actively accessed by a specific ARC
++ * consumer. The ARC will provide references to this data and will keep it
++ * cached until it is no longer in use. The ARC caches only the L1ARC's physical
++ * data block and will evict any arc_buf_t that is no longer referenced. The
++ * amount of memory consumed by the arc_buf_ts' data buffers can be seen via the
++ * "overhead_size" kstat.
++ *
++ * Depending on the consumer, an arc_buf_t can be requested in uncompressed or
++ * compressed form. The typical case is that consumers will want uncompressed
++ * data, and when that happens a new data buffer is allocated where the data is
++ * decompressed for them to use. Currently the only consumer who wants
++ * compressed arc_buf_t's is "zfs send", when it streams data exactly as it
++ * exists on disk. When this happens, the arc_buf_t's data buffer is shared
++ * with the arc_buf_hdr_t.
++ *
++ * Here is a diagram showing an arc_buf_hdr_t referenced by two arc_buf_t's. The
++ * first one is owned by a compressed send consumer (and therefore references
++ * the same compressed data buffer as the arc_buf_hdr_t) and the second could be
++ * used by any other consumer (and has its own uncompressed copy of the data
++ * buffer).
++ *
++ *   arc_buf_hdr_t
++ *   +-----------+
++ *   | fields    |
++ *   | common to |
++ *   | L1- and   |
++ *   | L2ARC     |
++ *   +-----------+
++ *   | l2arc_buf_hdr_t
++ *   |           |
++ *   +-----------+
++ *   | l1arc_buf_hdr_t
++ *   |           |              arc_buf_t
++ *   | b_buf     +------------>+-----------+      arc_buf_t
++ *   | b_pdata   +-+           |b_next     +---->+-----------+
++ *   +-----------+ |           |-----------|     |b_next     +-->NULL
++ *                 |           |b_comp = T |     +-----------+
++ *                 |           |b_data     +-+   |b_comp = F |
++ *                 |           +-----------+ |   |b_data     +-+
++ *                 +->+------+               |   +-----------+ |
++ *        compressed  |      |               |                 |
++ *           data     |      |<--------------+                 | uncompressed
++ *                    +------+          compressed,            |     data
++ *                                        shared               +-->+------+
++ *                                         data                    |      |
++ *                                                                 |      |
++ *                                                                 +------+
++ *
+  * When a consumer reads a block, the ARC must first look to see if the
+- * arc_buf_hdr_t is cached. If the hdr is cached and already has an arc_buf_t,
+- * then an additional arc_buf_t is allocated and the uncompressed data is
+- * bcopied from the existing arc_buf_t. If the hdr is cached but does not
+- * have an arc_buf_t, then the ARC allocates a new arc_buf_t and decompresses
+- * the b_pdata contents into the arc_buf_t's b_data. If the arc_buf_hdr_t's
+- * b_pdata is not compressed, then the block is shared with the newly
+- * allocated arc_buf_t. This block sharing only occurs with one arc_buf_t
+- * in the arc buffer chain. Sharing the block reduces the memory overhead
+- * required when the hdr is caching uncompressed blocks or the compressed
+- * arc functionality has been disabled via 'zfs_compressed_arc_enabled'.
++ * arc_buf_hdr_t is cached. If the hdr is cached then the ARC allocates a new
++ * arc_buf_t and either copies uncompressed data into a new data buffer from an
++ * existing uncompressed arc_buf_t, decompresses the hdr's b_pdata buffer into a
++ * new data buffer, or shares the hdr's b_pdata buffer, depending on whether the
++ * hdr is compressed and the desired compression characteristics of the
++ * arc_buf_t consumer. If the arc_buf_t ends up sharing data with the
++ * arc_buf_hdr_t and both of them are uncompressed then the arc_buf_t must be
++ * the last buffer in the hdr's b_buf list, however a shared compressed buf can
++ * be anywhere in the hdr's list.
+  *
+  * The diagram below shows an example of an uncompressed ARC hdr that is
+- * sharing its data with an arc_buf_t:
++ * sharing its data with an arc_buf_t (note that the shared uncompressed buf is
++ * the last element in the buf list):
+  *
+  *                arc_buf_hdr_t
+  *                +-----------+
+@@ -225,20 +230,24 @@
+  *                                    |                    +------+     |
+  *                                    +---------------------------------+
+  *
+- * Writing to the arc requires that the ARC first discard the b_pdata
++ * Writing to the ARC requires that the ARC first discard the hdr's b_pdata
+  * since the physical block is about to be rewritten. The new data contents
+- * will be contained in the arc_buf_t (uncompressed). As the I/O pipeline
+- * performs the write, it may compress the data before writing it to disk.
+- * The ARC will be called with the transformed data and will bcopy the
+- * transformed on-disk block into a newly allocated b_pdata.
++ * will be contained in the arc_buf_t. As the I/O pipeline performs the write,
++ * it may compress the data before writing it to disk. The ARC will be called
++ * with the transformed data and will bcopy the transformed on-disk block into
++ * a newly allocated b_pdata. Writes are always done into buffers which have
++ * either been loaned (and hence are new and don't have other readers) or
++ * buffers which have been released (and hence have their own hdr, if there
++ * were originally other readers of the buf's original hdr). This ensures that
++ * the ARC only needs to update a single buf and its hdr after a write occurs.
+  *
+  * When the L2ARC is in use, it will also take advantage of the b_pdata. The
+  * L2ARC will always write the contents of b_pdata to the L2ARC. This means
+- * that when compressed arc is enabled that the L2ARC blocks are identical
++ * that when compressed ARC is enabled that the L2ARC blocks are identical
+  * to the on-disk block in the main data pool. This provides a significant
+  * advantage since the ARC can leverage the bp's checksum when reading from the
+  * L2ARC to determine if the contents are valid. However, if the compressed
+- * arc is disabled, then the L2ARC's block must be transformed to look
++ * ARC is disabled, then the L2ARC's block must be transformed to look
+  * like the physical block in the main data pool before comparing the
+  * checksum and determining its validity.
+  */
+@@ -805,6 +814,7 @@ struct arc_callback {
+ 	void			*acb_private;
+ 	arc_done_func_t		*acb_done;
+ 	arc_buf_t		*acb_buf;
++	boolean_t		acb_compressed;
+ 	zio_t			*acb_zio_dummy;
+ 	arc_callback_t		*acb_next;
+ };
+@@ -970,6 +980,8 @@ struct arc_buf_hdr {
+ 	HDR_COMPRESS_OFFSET, SPA_COMPRESSBITS, (cmp));
+ 
+ #define	ARC_BUF_LAST(buf)	((buf)->b_next == NULL)
++#define	ARC_BUF_SHARED(buf)	((buf)->b_prop_flags & ARC_BUF_FLAG_SHARED)
++#define	ARC_BUF_COMPRESSED(buf)	((buf)->b_prop_flags & ARC_BUF_FLAG_COMPRESSED)
+ 
+ /*
+  * Other sizes
+@@ -1064,7 +1076,7 @@ static kmutex_t l2arc_free_on_write_mtx;	/* mutex for list */
+ static uint64_t l2arc_ndev;			/* number of devices */
+ 
+ typedef struct l2arc_read_callback {
+-	arc_buf_hdr_t		*l2rcb_hdr;		/* read buffer */
++	arc_buf_hdr_t		*l2rcb_hdr;		/* read header */
+ 	blkptr_t		l2rcb_bp;		/* original blkptr */
+ 	zbookmark_phys_t	l2rcb_zb;		/* original bookmark */
+ 	int			l2rcb_flags;		/* original flags */
+@@ -1399,6 +1411,31 @@ retry:
+ 	}
+ }
+ 
++/*
++ * This is the size that the buf occupies in memory. If the buf is compressed,
++ * it will correspond to the compressed size. You should use this method of
++ * getting the buf size unless you explicitly need the logical size.
++ */
++int32_t
++arc_buf_size(arc_buf_t *buf)
++{
++	return (ARC_BUF_COMPRESSED(buf) ?
++	    HDR_GET_PSIZE(buf->b_hdr) : HDR_GET_LSIZE(buf->b_hdr));
++}
++
++int32_t
++arc_buf_lsize(arc_buf_t *buf)
++{
++	return (HDR_GET_LSIZE(buf->b_hdr));
++}
++
++enum zio_compress
++arc_get_compression(arc_buf_t *buf)
++{
++	return (ARC_BUF_COMPRESSED(buf) ?
++	    HDR_GET_COMPRESS(buf->b_hdr) : ZIO_COMPRESS_OFF);
++}
++
+ #define	ARC_MINTIME	(hz>>4) /* 62 ms */
+ 
+ static inline boolean_t
+@@ -1407,6 +1444,8 @@ arc_buf_is_shared(arc_buf_t *buf)
+ 	boolean_t shared = (buf->b_data != NULL &&
+ 	    buf->b_data == buf->b_hdr->b_l1hdr.b_pdata);
+ 	IMPLY(shared, HDR_SHARED_DATA(buf->b_hdr));
++	IMPLY(shared, ARC_BUF_SHARED(buf));
++	IMPLY(shared, ARC_BUF_COMPRESSED(buf) || ARC_BUF_LAST(buf));
+ 	return (shared);
+ }
+ 
+@@ -1438,7 +1477,8 @@ arc_cksum_verify(arc_buf_t *buf)
+ 		mutex_exit(&hdr->b_l1hdr.b_freeze_lock);
+ 		return;
+ 	}
+-	fletcher_2_native(buf->b_data, HDR_GET_LSIZE(hdr), NULL, &zc);
++
++	fletcher_2_native(buf->b_data, arc_buf_size(buf), NULL, &zc);
+ 	if (!ZIO_CHECKSUM_EQUAL(*hdr->b_l1hdr.b_freeze_cksum, zc))
+ 		panic("buffer modified while frozen!");
+ 	mutex_exit(&hdr->b_l1hdr.b_freeze_lock);
+@@ -1521,15 +1561,23 @@ arc_cksum_compute(arc_buf_t *buf)
+ 		return;
+ 
+ 	ASSERT(HDR_HAS_L1HDR(hdr));
++
+ 	mutex_enter(&buf->b_hdr->b_l1hdr.b_freeze_lock);
+ 	if (hdr->b_l1hdr.b_freeze_cksum != NULL) {
++		ASSERT(!ARC_BUF_COMPRESSED(buf) || hdr->b_l1hdr.b_bufcnt > 1);
++		mutex_exit(&hdr->b_l1hdr.b_freeze_lock);
++		return;
++	} else if (ARC_BUF_COMPRESSED(buf)) {
++		ASSERT3U(hdr->b_l1hdr.b_bufcnt, ==, 1);
+ 		mutex_exit(&hdr->b_l1hdr.b_freeze_lock);
+ 		return;
+ 	}
++
++	ASSERT(!ARC_BUF_COMPRESSED(buf));
+ 	hdr->b_l1hdr.b_freeze_cksum = kmem_alloc(sizeof (zio_cksum_t),
+ 	    KM_SLEEP);
+-	fletcher_2_native(buf->b_data, HDR_GET_LSIZE(hdr),
+-	    NULL, hdr->b_l1hdr.b_freeze_cksum);
++	fletcher_2_native(buf->b_data, arc_buf_size(buf), NULL,
++	    hdr->b_l1hdr.b_freeze_cksum);
+ 	mutex_exit(&hdr->b_l1hdr.b_freeze_lock);
+ 	arc_buf_watch(buf);
+ }
+@@ -1569,7 +1617,7 @@ arc_buf_watch(arc_buf_t *buf)
+ 		procctl_t ctl;
+ 		ctl.cmd = PCWATCH;
+ 		ctl.prwatch.pr_vaddr = (uintptr_t)buf->b_data;
+-		ctl.prwatch.pr_size = HDR_GET_LSIZE(buf->b_hdr);
++		ctl.prwatch.pr_size = arc_buf_size(buf);
+ 		ctl.prwatch.pr_wflags = WA_WRITE;
+ 		result = write(arc_procfd, &ctl, sizeof (ctl));
+ 		ASSERT3U(result, ==, sizeof (ctl));
+@@ -1590,6 +1638,12 @@ arc_buf_type(arc_buf_hdr_t *hdr)
+ 	return (type);
+ }
+ 
++boolean_t
++arc_is_metadata(arc_buf_t *buf)
++{
++	return (HDR_ISTYPE_METADATA(buf->b_hdr) != 0);
++}
++
+ static uint32_t
+ arc_bufc_to_flags(arc_buf_contents_t type)
+ {
+@@ -1611,14 +1665,23 @@ arc_buf_thaw(arc_buf_t *buf)
+ {
+ 	arc_buf_hdr_t *hdr = buf->b_hdr;
+ 
++	ASSERT3P(hdr->b_l1hdr.b_state, ==, arc_anon);
++	ASSERT(!HDR_IO_IN_PROGRESS(hdr));
++
+ 	if (zfs_flags & ZFS_DEBUG_MODIFY) {
+-		if (hdr->b_l1hdr.b_state != arc_anon)
+-			panic("modifying non-anon buffer!");
+-		if (HDR_IO_IN_PROGRESS(hdr))
+-			panic("modifying buffer while i/o in progress!");
+ 		arc_cksum_verify(buf);
+ 	}
+ 
++	/*
++	 * Compressed buffers do not manipulate the b_freeze_cksum or
++	 * allocate b_thawed.
++	 */
++	if (ARC_BUF_COMPRESSED(buf)) {
++		ASSERT(hdr->b_l1hdr.b_freeze_cksum == NULL ||
++		    hdr->b_l1hdr.b_bufcnt > 1);
++		return;
++	}
++
+ 	ASSERT(HDR_HAS_L1HDR(hdr));
+ 	arc_cksum_free(hdr);
+ 
+@@ -1645,6 +1708,12 @@ arc_buf_freeze(arc_buf_t *buf)
+ 	if (!(zfs_flags & ZFS_DEBUG_MODIFY))
+ 		return;
+ 
++	if (ARC_BUF_COMPRESSED(buf)) {
++		ASSERT(hdr->b_l1hdr.b_freeze_cksum == NULL ||
++		    hdr->b_l1hdr.b_bufcnt > 1);
++		return;
++	}
++
+ 	hash_lock = HDR_LOCK(hdr);
+ 	mutex_enter(hash_lock);
+ 
+@@ -1653,7 +1722,6 @@ arc_buf_freeze(arc_buf_t *buf)
+ 	    hdr->b_l1hdr.b_state == arc_anon);
+ 	arc_cksum_compute(buf);
+ 	mutex_exit(hash_lock);
+-
+ }
+ 
+ /*
+@@ -1710,16 +1778,14 @@ arc_hdr_set_compress(arc_buf_hdr_t *hdr, enum zio_compress cmp)
+ 	}
+ }
+ 
+-static int
++int
+ arc_decompress(arc_buf_t *buf)
+ {
+ 	arc_buf_hdr_t *hdr = buf->b_hdr;
+ 	dmu_object_byteswap_t bswap = hdr->b_l1hdr.b_byteswap;
+ 	int error;
+ 
+-	if (arc_buf_is_shared(buf)) {
+-		ASSERT3U(HDR_GET_COMPRESS(hdr), ==, ZIO_COMPRESS_OFF);
+-	} else if (HDR_GET_COMPRESS(hdr) == ZIO_COMPRESS_OFF) {
++	if (HDR_GET_COMPRESS(hdr) == ZIO_COMPRESS_OFF) {
+ 		/*
+ 		 * The arc_buf_hdr_t is either not compressed or is
+ 		 * associated with an embedded block or a hole in which
+@@ -1727,11 +1793,31 @@ arc_decompress(arc_buf_t *buf)
+ 		 */
+ 		IMPLY(HDR_COMPRESSION_ENABLED(hdr), HDR_GET_PSIZE(hdr) == 0 ||
+ 		    HDR_GET_PSIZE(hdr) == HDR_GET_LSIZE(hdr));
+-		ASSERT(!HDR_SHARED_DATA(hdr));
+-		bcopy(hdr->b_l1hdr.b_pdata, buf->b_data, HDR_GET_LSIZE(hdr));
++		if (!arc_buf_is_shared(buf)) {
++			bcopy(hdr->b_l1hdr.b_pdata, buf->b_data,
++			    HDR_GET_LSIZE(hdr));
++		}
+ 	} else {
+-		ASSERT(!HDR_SHARED_DATA(hdr));
+ 		ASSERT3U(HDR_GET_LSIZE(hdr), !=, HDR_GET_PSIZE(hdr));
++
++		/*
++		 * If the buf is compressed and sharing data with hdr, unlink
++		 * its data buf from the header and make it uncompressed.
++		 */
++		if (ARC_BUF_COMPRESSED(buf)) {
++			buf->b_prop_flags &=
++			    ~(ARC_BUF_FLAG_SHARED | ARC_BUF_FLAG_COMPRESSED);
++			buf->b_data =
++			    arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf);
++			arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
++
++			/*
++			 * Previously this buf was shared so overhead was 0, so
++			 * just add new overhead.
++			 */
++			ARCSTAT_INCR(arcstat_overhead_size, HDR_GET_LSIZE(hdr));
++		}
++
+ 		error = zio_decompress_data(HDR_GET_COMPRESS(hdr),
+ 		    hdr->b_l1hdr.b_pdata, buf->b_data, HDR_GET_PSIZE(hdr),
+ 		    HDR_GET_LSIZE(hdr));
+@@ -1778,7 +1864,6 @@ static void
+ arc_evictable_space_increment(arc_buf_hdr_t *hdr, arc_state_t *state)
+ {
+ 	arc_buf_contents_t type = arc_buf_type(hdr);
+-	uint64_t lsize = HDR_GET_LSIZE(hdr);
+ 
+ 	ASSERT(HDR_HAS_L1HDR(hdr));
+ 
+@@ -1786,7 +1871,8 @@ arc_evictable_space_increment(arc_buf_hdr_t *hdr, arc_state_t *state)
+ 		ASSERT0(hdr->b_l1hdr.b_bufcnt);
+ 		ASSERT3P(hdr->b_l1hdr.b_buf, ==, NULL);
+ 		ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
+-		(void) refcount_add_many(&state->arcs_esize[type], lsize, hdr);
++		(void) refcount_add_many(&state->arcs_esize[type],
++		    HDR_GET_LSIZE(hdr), hdr);
+ 		return;
+ 	}
+ 
+@@ -1797,11 +1883,11 @@ arc_evictable_space_increment(arc_buf_hdr_t *hdr, arc_state_t *state)
+ 	}
+ 	for (arc_buf_t *buf = hdr->b_l1hdr.b_buf; buf != NULL;
+ 	    buf = buf->b_next) {
+-		if (arc_buf_is_shared(buf)) {
+-			ASSERT(ARC_BUF_LAST(buf));
++		if (arc_buf_is_shared(buf))
+ 			continue;
+-		}
+-		(void) refcount_add_many(&state->arcs_esize[type], lsize, buf);
++		ASSERT3U(HDR_GET_LSIZE(hdr), ==, arc_buf_size(buf));
++		(void) refcount_add_many(&state->arcs_esize[type],
++		    arc_buf_size(buf), buf);
+ 	}
+ }
+ 
+@@ -1811,10 +1897,9 @@ arc_evictable_space_increment(arc_buf_hdr_t *hdr, arc_state_t *state)
+  * so that we can add and remove them from the refcount individually.
+  */
+ static void
+-arc_evitable_space_decrement(arc_buf_hdr_t *hdr, arc_state_t *state)
++arc_evictable_space_decrement(arc_buf_hdr_t *hdr, arc_state_t *state)
+ {
+ 	arc_buf_contents_t type = arc_buf_type(hdr);
+-	uint64_t lsize = HDR_GET_LSIZE(hdr);
+ 
+ 	ASSERT(HDR_HAS_L1HDR(hdr));
+ 
+@@ -1823,7 +1908,7 @@ arc_evitable_space_decrement(arc_buf_hdr_t *hdr, arc_state_t *state)
+ 		ASSERT3P(hdr->b_l1hdr.b_buf, ==, NULL);
+ 		ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
+ 		(void) refcount_remove_many(&state->arcs_esize[type],
+-		    lsize, hdr);
++		    HDR_GET_LSIZE(hdr), hdr);
+ 		return;
+ 	}
+ 
+@@ -1834,12 +1919,11 @@ arc_evitable_space_decrement(arc_buf_hdr_t *hdr, arc_state_t *state)
+ 	}
+ 	for (arc_buf_t *buf = hdr->b_l1hdr.b_buf; buf != NULL;
+ 	    buf = buf->b_next) {
+-		if (arc_buf_is_shared(buf)) {
+-			ASSERT(ARC_BUF_LAST(buf));
++		if (arc_buf_is_shared(buf))
+ 			continue;
+-		}
++		ASSERT3U(HDR_GET_LSIZE(hdr), ==, arc_buf_size(buf));
+ 		(void) refcount_remove_many(&state->arcs_esize[type],
+-		    lsize, buf);
++		    arc_buf_size(buf), buf);
+ 	}
+ }
+ 
+@@ -1867,7 +1951,7 @@ add_reference(arc_buf_hdr_t *hdr, void *tag)
+ 		if (state != arc_l2c_only) {
+ 			multilist_remove(&state->arcs_list[arc_buf_type(hdr)],
+ 			    hdr);
+-			arc_evitable_space_decrement(hdr, state);
++			arc_evictable_space_decrement(hdr, state);
+ 		}
+ 		/* remove the prefetch flag if we get a reference */
+ 		arc_hdr_clear_flags(hdr, ARC_FLAG_PREFETCH);
+@@ -1955,7 +2039,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
+ 				ASSERT3P(hdr->b_l1hdr.b_buf, ==, NULL);
+ 				update_old = B_TRUE;
+ 			}
+-			arc_evitable_space_decrement(hdr, old_state);
++			arc_evictable_space_decrement(hdr, old_state);
+ 		}
+ 		if (new_state != arc_anon && new_state != arc_l2c_only) {
+ 
+@@ -2018,13 +2102,13 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
+ 				 * add to the refcount if the arc_buf_t is
+ 				 * not shared.
+ 				 */
+-				if (arc_buf_is_shared(buf)) {
+-					ASSERT(ARC_BUF_LAST(buf));
++				if (arc_buf_is_shared(buf))
+ 					continue;
+-				}
+ 
++				ASSERT3U(HDR_GET_LSIZE(hdr), ==,
++				    arc_buf_size(buf));
+ 				(void) refcount_add_many(&new_state->arcs_size,
+-				    HDR_GET_LSIZE(hdr), buf);
++				    arc_buf_size(buf), buf);
+ 			}
+ 			ASSERT3U(bufcnt, ==, buffers);
+ 
+@@ -2041,6 +2125,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
+ 		ASSERT(HDR_HAS_L1HDR(hdr));
+ 		if (GHOST_STATE(old_state)) {
+ 			ASSERT0(bufcnt);
++			ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
+ 
+ 			/*
+ 			 * When moving a header off of a ghost state,
+@@ -2052,7 +2137,6 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
+ 
+ 			(void) refcount_remove_many(&old_state->arcs_size,
+ 			    HDR_GET_LSIZE(hdr), hdr);
+-			ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
+ 		} else {
+ 			uint32_t buffers = 0;
+ 
+@@ -2063,7 +2147,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
+ 			 */
+ 			for (arc_buf_t *buf = hdr->b_l1hdr.b_buf; buf != NULL;
+ 			    buf = buf->b_next) {
+-				ASSERT3P(bufcnt, !=, 0);
++				ASSERT3U(bufcnt, !=, 0);
+ 				buffers++;
+ 
+ 				/*
+@@ -2073,13 +2157,13 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
+ 				 * add to the refcount if the arc_buf_t is
+ 				 * not shared.
+ 				 */
+-				if (arc_buf_is_shared(buf)) {
+-					ASSERT(ARC_BUF_LAST(buf));
++				if (arc_buf_is_shared(buf))
+ 					continue;
+-				}
+ 
++				ASSERT3U(HDR_GET_LSIZE(hdr), ==,
++				    arc_buf_size(buf));
+ 				(void) refcount_remove_many(
+-				    &old_state->arcs_size, HDR_GET_LSIZE(hdr),
++				    &old_state->arcs_size, arc_buf_size(buf),
+ 				    buf);
+ 			}
+ 			ASSERT3U(bufcnt, ==, buffers);
+@@ -2164,11 +2248,11 @@ arc_space_return(uint64_t space, arc_space_type_t type)
+ }
+ 
+ /*
+- * Allocate an initial buffer for this hdr, subsequent buffers will
+- * use arc_buf_clone().
++ * Allocate either the first buffer for this hdr, or a compressed buffer for
++ * this hdr. Subsequent non-compressed buffers use arc_buf_clone().
+  */
+ static arc_buf_t *
+-arc_buf_alloc_impl(arc_buf_hdr_t *hdr, void *tag)
++arc_buf_alloc_impl(arc_buf_hdr_t *hdr, void *tag, boolean_t compressed)
+ {
+ 	arc_buf_t *buf;
+ 
+@@ -2177,14 +2261,10 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, void *tag)
+ 	VERIFY(hdr->b_type == ARC_BUFC_DATA ||
+ 	    hdr->b_type == ARC_BUFC_METADATA);
+ 
+-	ASSERT(refcount_is_zero(&hdr->b_l1hdr.b_refcnt));
+-	ASSERT3P(hdr->b_l1hdr.b_buf, ==, NULL);
+-	ASSERT0(hdr->b_l1hdr.b_bufcnt);
+-
+ 	buf = kmem_cache_alloc(buf_cache, KM_PUSHPAGE);
+ 	buf->b_hdr = hdr;
+ 	buf->b_data = NULL;
+-	buf->b_next = NULL;
++	buf->b_next = hdr->b_l1hdr.b_buf;
+ 
+ 	add_reference(hdr, tag);
+ 
+@@ -2195,20 +2275,30 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, void *tag)
+ 	ASSERT(MUTEX_HELD(HDR_LOCK(hdr)) || HDR_EMPTY(hdr));
+ 
+ 	/*
+-	 * If the hdr needs to be byteswapped or is compressed then allocate
+-	 * an uncompressed buffer for the arc_buf_t. Otherwise, this arc_buf_t
+-	 * will share the hdr's b_pdata since it is also uncompressed.
+-	 * If an additional arc_buf_t is required then arc_buf_clone()
+-	 * will bcopy this arc_buf_t's data and into its own buffer.
+-	 * We also set the appropriate bit in the hdr's b_flags to indicate
+-	 * whether or not the hdr is sharing it's b_pdata with the arc_buf_t.
++	 * If the hdr's data can be shared (no byteswapping, hdr compression
++	 * matches the requested buf compression) then we share the data buffer
++	 * and set the appropriate bit in the hdr's b_flags to indicate
++	 * the hdr is sharing it's b_pdata with the arc_buf_t. Otherwise, we
++	 * allocate a new buffer to store the buf's data.
+ 	 */
+-	if (hdr->b_l1hdr.b_byteswap == DMU_BSWAP_NUMFUNCS &&
+-	    HDR_GET_COMPRESS(hdr) == ZIO_COMPRESS_OFF) {
++	if (hdr->b_l1hdr.b_byteswap == DMU_BSWAP_NUMFUNCS && compressed &&
++	    HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF) {
++		ASSERT(!HDR_SHARED_DATA(hdr));
+ 		buf->b_data = hdr->b_l1hdr.b_pdata;
++		buf->b_prop_flags =
++		    ARC_BUF_FLAG_SHARED | ARC_BUF_FLAG_COMPRESSED;
++		arc_hdr_set_flags(hdr, ARC_FLAG_SHARED_DATA);
++	} else if (hdr->b_l1hdr.b_byteswap == DMU_BSWAP_NUMFUNCS &&
++	    !compressed && HDR_GET_COMPRESS(hdr) == ZIO_COMPRESS_OFF) {
++		ASSERT(!HDR_SHARED_DATA(hdr));
++		ASSERT(ARC_BUF_LAST(buf));
++		buf->b_data = hdr->b_l1hdr.b_pdata;
++		buf->b_prop_flags = ARC_BUF_FLAG_SHARED;
+ 		arc_hdr_set_flags(hdr, ARC_FLAG_SHARED_DATA);
+ 	} else {
++		ASSERT(!compressed);
+ 		buf->b_data = arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf);
++		buf->b_prop_flags = 0;
+ 		ARCSTAT_INCR(arcstat_overhead_size, HDR_GET_LSIZE(hdr));
+ 		arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
+ 	}
+@@ -2232,10 +2322,12 @@ arc_buf_clone(arc_buf_t *from)
+ 
+ 	ASSERT(HDR_HAS_L1HDR(hdr));
+ 	ASSERT(hdr->b_l1hdr.b_state != arc_anon);
++	ASSERT(!ARC_BUF_COMPRESSED(from));
+ 
+ 	buf = kmem_cache_alloc(buf_cache, KM_PUSHPAGE);
+ 	buf->b_hdr = hdr;
+ 	buf->b_data = NULL;
++	buf->b_prop_flags = 0;
+ 	buf->b_next = hdr->b_l1hdr.b_buf;
+ 	hdr->b_l1hdr.b_buf = buf;
+ 	buf->b_data = arc_get_data_buf(hdr, HDR_GET_LSIZE(hdr), buf);
+@@ -2255,16 +2347,27 @@ static char *arc_onloan_tag = "onloan";
+  * freed.
+  */
+ arc_buf_t *
+-arc_loan_buf(spa_t *spa, int size)
++arc_loan_buf(spa_t *spa, boolean_t is_metadata, int size)
+ {
+-	arc_buf_t *buf;
+-
+-	buf = arc_alloc_buf(spa, size, arc_onloan_tag, ARC_BUFC_DATA);
++	arc_buf_t *buf = arc_alloc_buf(spa, arc_onloan_tag,
++	    is_metadata ? ARC_BUFC_METADATA : ARC_BUFC_DATA, size);
+ 
+ 	atomic_add_64(&arc_loaned_bytes, size);
+ 	return (buf);
+ }
+ 
++arc_buf_t *
++arc_loan_compressed_buf(spa_t *spa, uint64_t psize, uint64_t lsize,
++    enum zio_compress compression_type)
++{
++	arc_buf_t *buf = arc_alloc_compressed_buf(spa, arc_onloan_tag,
++	    psize, lsize, compression_type);
++
++	atomic_add_64(&arc_loaned_bytes, psize);
++	return (buf);
++}
++
++
+ /*
+  * Return a loaned arc buffer to the arc.
+  */
+@@ -2278,7 +2381,7 @@ arc_return_buf(arc_buf_t *buf, void *tag)
+ 	(void) refcount_add(&hdr->b_l1hdr.b_refcnt, tag);
+ 	(void) refcount_remove(&hdr->b_l1hdr.b_refcnt, arc_onloan_tag);
+ 
+-	atomic_add_64(&arc_loaned_bytes, -HDR_GET_LSIZE(hdr));
++	atomic_add_64(&arc_loaned_bytes, -arc_buf_size(buf));
+ }
+ 
+ /* Detach an arc_buf from a dbuf (tag) */
+@@ -2292,7 +2395,7 @@ arc_loan_inuse_buf(arc_buf_t *buf, void *tag)
+ 	(void) refcount_add(&hdr->b_l1hdr.b_refcnt, arc_onloan_tag);
+ 	(void) refcount_remove(&hdr->b_l1hdr.b_refcnt, tag);
+ 
+-	atomic_add_64(&arc_loaned_bytes, HDR_GET_LSIZE(hdr));
++	atomic_add_64(&arc_loaned_bytes, -arc_buf_size(buf));
+ }
+ 
+ static void
+@@ -2345,6 +2448,7 @@ arc_share_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
+ 	refcount_transfer_ownership(&state->arcs_size, buf, hdr);
+ 	hdr->b_l1hdr.b_pdata = buf->b_data;
+ 	arc_hdr_set_flags(hdr, ARC_FLAG_SHARED_DATA);
++	buf->b_prop_flags |= ARC_BUF_FLAG_SHARED;
+ 
+ 	/*
+ 	 * Since we've transferred ownership to the hdr we need
+@@ -2353,7 +2457,7 @@ arc_share_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
+ 	 */
+ 	ARCSTAT_INCR(arcstat_compressed_size, arc_hdr_size(hdr));
+ 	ARCSTAT_INCR(arcstat_uncompressed_size, HDR_GET_LSIZE(hdr));
+-	ARCSTAT_INCR(arcstat_overhead_size, -HDR_GET_LSIZE(hdr));
++	ARCSTAT_INCR(arcstat_overhead_size, -arc_buf_size(buf));
+ }
+ 
+ static void
+@@ -2373,6 +2477,7 @@ arc_unshare_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
+ 	refcount_transfer_ownership(&state->arcs_size, hdr, buf);
+ 	arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
+ 	hdr->b_l1hdr.b_pdata = NULL;
++	buf->b_prop_flags &= ~ARC_BUF_FLAG_SHARED;
+ 
+ 	/*
+ 	 * Since the buffer is no longer shared between
+@@ -2380,58 +2485,27 @@ arc_unshare_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
+ 	 */
+ 	ARCSTAT_INCR(arcstat_compressed_size, -arc_hdr_size(hdr));
+ 	ARCSTAT_INCR(arcstat_uncompressed_size, -HDR_GET_LSIZE(hdr));
+-	ARCSTAT_INCR(arcstat_overhead_size, HDR_GET_LSIZE(hdr));
++	ARCSTAT_INCR(arcstat_overhead_size, arc_buf_size(buf));
+ }
+ 
+ /*
+- * Free up buf->b_data and if 'remove' is set, then pull the
+- * arc_buf_t off of the the arc_buf_hdr_t's list and free it.
++ * Remove an arc_buf_t from the hdr's buf list and return the last
++ * arc_buf_t on the list. If no buffers remain on the list then return
++ * NULL.
+  */
+-static void
+-arc_buf_destroy_impl(arc_buf_t *buf, boolean_t remove)
++static arc_buf_t *
++arc_buf_remove(arc_buf_hdr_t *hdr, arc_buf_t *buf)
+ {
+-	arc_buf_t **bufp;
+-	arc_buf_hdr_t *hdr = buf->b_hdr;
+-	uint64_t size = HDR_GET_LSIZE(hdr);
+-	boolean_t destroyed_buf_is_shared = arc_buf_is_shared(buf);
++	ASSERT(HDR_HAS_L1HDR(hdr));
++	ASSERT(MUTEX_HELD(HDR_LOCK(hdr)) || HDR_EMPTY(hdr));
++
++	arc_buf_t **bufp = &hdr->b_l1hdr.b_buf;
++	arc_buf_t *lastbuf = NULL;
+ 
+ 	/*
+-	 * Free up the data associated with the buf but only
+-	 * if we're not sharing this with the hdr. If we are sharing
+-	 * it with the hdr, then hdr will have performed the allocation
+-	 * so allow it to do the free.
++	 * Remove the buf from the hdr list and locate the last
++	 * remaining buffer on the list.
+ 	 */
+-	if (buf->b_data != NULL) {
+-		/*
+-		 * We're about to change the hdr's b_flags. We must either
+-		 * hold the hash_lock or be undiscoverable.
+-		 */
+-		ASSERT(MUTEX_HELD(HDR_LOCK(hdr)) || HDR_EMPTY(hdr));
+-
+-		arc_cksum_verify(buf);
+-		arc_buf_unwatch(buf);
+-
+-		if (destroyed_buf_is_shared) {
+-			ASSERT(ARC_BUF_LAST(buf));
+-			ASSERT(HDR_SHARED_DATA(hdr));
+-			arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
+-		} else {
+-			arc_free_data_buf(hdr, buf->b_data, size, buf);
+-			ARCSTAT_INCR(arcstat_overhead_size, -size);
+-		}
+-		buf->b_data = NULL;
+-
+-		ASSERT(hdr->b_l1hdr.b_bufcnt > 0);
+-		hdr->b_l1hdr.b_bufcnt -= 1;
+-	}
+-
+-	/* only remove the buf if requested */
+-	if (!remove)
+-		return;
+-
+-	/* remove the buf from the hdr list */
+-	arc_buf_t *lastbuf = NULL;
+-	bufp = &hdr->b_l1hdr.b_buf;
+ 	while (*bufp != NULL) {
+ 		if (*bufp == buf)
+ 			*bufp = buf->b_next;
+@@ -2448,31 +2522,100 @@ arc_buf_destroy_impl(arc_buf_t *buf, boolean_t remove)
+ 	}
+ 	buf->b_next = NULL;
+ 	ASSERT3P(lastbuf, !=, buf);
++	IMPLY(hdr->b_l1hdr.b_bufcnt > 0, lastbuf != NULL);
++	IMPLY(hdr->b_l1hdr.b_bufcnt > 0, hdr->b_l1hdr.b_buf != NULL);
++	IMPLY(lastbuf != NULL, ARC_BUF_LAST(lastbuf));
++
++	return (lastbuf);
++}
++
++/*
++ * Free up buf->b_data and pull the arc_buf_t off of the the arc_buf_hdr_t's
++ * list and free it.
++ */
++static void
++arc_buf_destroy_impl(arc_buf_t *buf)
++{
++	arc_buf_hdr_t *hdr = buf->b_hdr;
+ 
+ 	/*
+-	 * If the current arc_buf_t is sharing its data
+-	 * buffer with the hdr, then reassign the hdr's
+-	 * b_pdata to share it with the new buffer at the end
+-	 * of the list. The shared buffer is always the last one
+-	 * on the hdr's buffer list.
++	 * Free up the data associated with the buf but only
++	 * if we're not sharing this with the hdr. If we are sharing
++	 * it with the hdr, then hdr will have performed the allocation
++	 * so allow it to do the free.
+ 	 */
+-	if (destroyed_buf_is_shared && lastbuf != NULL) {
+-		ASSERT(ARC_BUF_LAST(buf));
+-		ASSERT(ARC_BUF_LAST(lastbuf));
+-		VERIFY(!arc_buf_is_shared(lastbuf));
++	if (buf->b_data != NULL) {
++		/*
++		 * We're about to change the hdr's b_flags. We must either
++		 * hold the hash_lock or be undiscoverable.
++		 */
++		ASSERT(MUTEX_HELD(HDR_LOCK(hdr)) || HDR_EMPTY(hdr));
+ 
+-		ASSERT3P(hdr->b_l1hdr.b_pdata, !=, NULL);
+-		arc_hdr_free_pdata(hdr);
++		if (!ARC_BUF_COMPRESSED(buf)) {
++			arc_cksum_verify(buf);
++		}
++		arc_buf_unwatch(buf);
++
++		if (arc_buf_is_shared(buf)) {
++			arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
++		} else {
++			uint64_t size = arc_buf_size(buf);
++			arc_free_data_buf(hdr, buf->b_data, size, buf);
++			ARCSTAT_INCR(arcstat_overhead_size, -size);
++		}
++		buf->b_data = NULL;
++
++		ASSERT(hdr->b_l1hdr.b_bufcnt > 0);
++		hdr->b_l1hdr.b_bufcnt -= 1;
++	}
++
++	arc_buf_t *lastbuf = arc_buf_remove(hdr, buf);
++
++	if (ARC_BUF_COMPRESSED(buf)) {
++		/*
++		 * For compressed, shared buffers we don't need to do anything
++		 * special so take the opportunity to ensure that compressed
++		 * buffers must be shared. The hdr has already been marked as
++		 * not shared and we already cleared b_data, so just check the
++		 * flag on the buf.
++		 */
++		VERIFY(ARC_BUF_SHARED(buf));
++	} else if (ARC_BUF_SHARED(buf)) {
++		ASSERT(!ARC_BUF_COMPRESSED(buf));
+ 
+ 		/*
+-		 * We must setup a new shared block between the
+-		 * last buffer and the hdr. The data would have
+-		 * been allocated by the arc buf so we need to transfer
+-		 * ownership to the hdr since it's now being shared.
++		 * If the current arc_buf_t is sharing its data
++		 * buffer with the hdr, then reassign the hdr's
++		 * b_pdata to share it with the new buffer at the end
++		 * of the list. The shared buffer is always the last one
++		 * on the hdr's buffer list.
+ 		 */
+-		arc_share_buf(hdr, lastbuf);
++		if (lastbuf != NULL) {
++			VERIFY(!arc_buf_is_shared(lastbuf));
++
++			ASSERT3P(hdr->b_l1hdr.b_pdata, !=, NULL);
++			arc_hdr_free_pdata(hdr);
++
++			/*
++			 * We must setup a new shared block between the
++			 * last buffer and the hdr. The data would have
++			 * been allocated by the arc buf so we need to transfer
++			 * ownership to the hdr since it's now being shared.
++			 */
++			arc_share_buf(hdr, lastbuf);
++		}
+ 	} else if (HDR_SHARED_DATA(hdr)) {
+-		ASSERT(arc_buf_is_shared(lastbuf));
++		/*
++		 * Uncompressed shared buffers are always at the end
++		 * of the list. Compressed buffers don't have the
++		 * same requirements. This makes it hard to
++		 * simply assert that the lastbuf is shared so
++		 * we rely on the hdr's compression flags to determine
++		 * if we have a compressed, shared buffer.
++		 */
++		ASSERT3P(lastbuf, !=, NULL);
++		ASSERT(arc_buf_is_shared(lastbuf) ||
++		    HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF);
+ 	}
+ 
+ 	if (hdr->b_l1hdr.b_bufcnt == 0)
+@@ -2527,11 +2670,10 @@ arc_hdr_free_pdata(arc_buf_hdr_t *hdr)
+ 
+ static arc_buf_hdr_t *
+ arc_hdr_alloc(uint64_t spa, int32_t psize, int32_t lsize,
+-    enum zio_compress compress, arc_buf_contents_t type)
++    enum zio_compress compression_type, arc_buf_contents_t type)
+ {
+ 	arc_buf_hdr_t *hdr;
+ 
+-	ASSERT3U(lsize, >, 0);
+ 	VERIFY(type == ARC_BUFC_DATA || type == ARC_BUFC_METADATA);
+ 
+ 	hdr = kmem_cache_alloc(hdr_full_cache, KM_PUSHPAGE);
+@@ -2544,7 +2686,7 @@ arc_hdr_alloc(uint64_t spa, int32_t psize, int32_t lsize,
+ 	hdr->b_type = type;
+ 	hdr->b_flags = 0;
+ 	arc_hdr_set_flags(hdr, arc_bufc_to_flags(type) | ARC_FLAG_HAS_L1HDR);
+-	arc_hdr_set_compress(hdr, compress);
++	arc_hdr_set_compress(hdr, compression_type);
+ 
+ 	hdr->b_l1hdr.b_state = arc_anon;
+ 	hdr->b_l1hdr.b_arc_access = 0;
+@@ -2666,13 +2808,39 @@ arc_hdr_realloc(arc_buf_hdr_t *hdr, kmem_cache_t *old, kmem_cache_t *new)
+  * The buf is returned thawed since we expect the consumer to modify it.
+  */
+ arc_buf_t *
+-arc_alloc_buf(spa_t *spa, int32_t size, void *tag, arc_buf_contents_t type)
++arc_alloc_buf(spa_t *spa, void *tag, arc_buf_contents_t type, int32_t size)
+ {
+ 	arc_buf_hdr_t *hdr = arc_hdr_alloc(spa_load_guid(spa), size, size,
+ 	    ZIO_COMPRESS_OFF, type);
+ 	ASSERT(!MUTEX_HELD(HDR_LOCK(hdr)));
+-	arc_buf_t *buf = arc_buf_alloc_impl(hdr, tag);
++
++	arc_buf_t *buf = arc_buf_alloc_impl(hdr, tag, B_FALSE);
+ 	arc_buf_thaw(buf);
++
++	return (buf);
++}
++
++/*
++ * Allocate a compressed buf in the same manner as arc_alloc_buf. Don't use this
++ * for bufs containing metadata.
++ */
++arc_buf_t *
++arc_alloc_compressed_buf(spa_t *spa, void *tag, uint64_t psize, uint64_t lsize,
++    enum zio_compress compression_type)
++{
++	ASSERT3U(lsize, >, 0);
++	ASSERT3U(lsize, >=, psize);
++	ASSERT(compression_type > ZIO_COMPRESS_OFF);
++	ASSERT(compression_type < ZIO_COMPRESS_FUNCTIONS);
++
++	arc_buf_hdr_t *hdr = arc_hdr_alloc(spa_load_guid(spa), psize, lsize,
++	    compression_type, ARC_BUFC_DATA);
++	ASSERT(!MUTEX_HELD(HDR_LOCK(hdr)));
++
++	arc_buf_t *buf = arc_buf_alloc_impl(hdr, tag, B_TRUE);
++	arc_buf_thaw(buf);
++	ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, ==, NULL);
++
+ 	return (buf);
+ }
+ 
+@@ -2739,7 +2907,7 @@ arc_hdr_destroy(arc_buf_hdr_t *hdr)
+ 		arc_cksum_free(hdr);
+ 
+ 		while (hdr->b_l1hdr.b_buf != NULL)
+-			arc_buf_destroy_impl(hdr->b_l1hdr.b_buf, B_TRUE);
++			arc_buf_destroy_impl(hdr->b_l1hdr.b_buf);
+ 
+ #ifdef ZFS_DEBUG
+ 		if (hdr->b_l1hdr.b_thawed != NULL) {
+@@ -2785,16 +2953,10 @@ arc_buf_destroy(arc_buf_t *buf, void* tag)
+ 	ASSERT3P(buf->b_data, !=, NULL);
+ 
+ 	(void) remove_reference(hdr, hash_lock, tag);
+-	arc_buf_destroy_impl(buf, B_TRUE);
++	arc_buf_destroy_impl(buf);
+ 	mutex_exit(hash_lock);
+ }
+ 
+-int32_t
+-arc_buf_size(arc_buf_t *buf)
+-{
+-	return (HDR_GET_LSIZE(buf->b_hdr));
+-}
+-
+ /*
+  * Evict the arc_buf_hdr that is provided as a parameter. The resultant
+  * state of the header is dependent on it's state prior to entering this
+@@ -2840,7 +3002,6 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
+ 
+ 		ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
+ 		if (HDR_HAS_L2HDR(hdr)) {
+-			ASSERT(hdr->b_l1hdr.b_pdata == NULL);
+ 			/*
+ 			 * This buffer is cached on the 2nd Level ARC;
+ 			 * don't destroy the header.
+@@ -2853,7 +3014,6 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
+ 			hdr = arc_hdr_realloc(hdr, hdr_full_cache,
+ 			    hdr_l2only_cache);
+ 		} else {
+-			ASSERT(hdr->b_l1hdr.b_pdata == NULL);
+ 			arc_change_state(arc_anon, hdr, hash_lock);
+ 			arc_hdr_destroy(hdr);
+ 		}
+@@ -2882,7 +3042,7 @@ arc_evict_hdr(arc_buf_hdr_t *hdr, kmutex_t *hash_lock)
+ 		if (buf->b_data != NULL)
+ 			bytes_evicted += HDR_GET_LSIZE(hdr);
+ 		mutex_exit(&buf->b_evict_lock);
+-		arc_buf_destroy_impl(buf, B_TRUE);
++		arc_buf_destroy_impl(buf);
+ 	}
+ 
+ 	if (HDR_HAS_L2HDR(hdr)) {
+@@ -3231,7 +3391,7 @@ arc_adjust_meta(void)
+ 	/*
+ 	 * Similar to the above, we want to evict enough bytes to get us
+ 	 * below the meta limit, but not so much as to drop us below the
+-	 * space alloted to the MFU (which is defined as arc_c - arc_p).
++	 * space allotted to the MFU (which is defined as arc_c - arc_p).
+ 	 */
+ 	target = MIN((int64_t)(arc_meta_used - arc_meta_limit),
+ 	    (int64_t)(refcount_count(&arc_mfu->arcs_size) - (arc_c - arc_p)));
+@@ -4180,7 +4340,7 @@ void
+ arc_bcopy_func(zio_t *zio, arc_buf_t *buf, void *arg)
+ {
+ 	if (zio == NULL || zio->io_error == 0)
+-		bcopy(buf->b_data, arg, HDR_GET_LSIZE(buf->b_hdr));
++		bcopy(buf->b_data, arg, arc_buf_size(buf));
+ 	arc_buf_destroy(buf, arg);
+ }
+ 
+@@ -4218,10 +4378,9 @@ static void
+ arc_read_done(zio_t *zio)
+ {
+ 	arc_buf_hdr_t	*hdr = zio->io_private;
+-	arc_buf_t	*abuf = NULL;	/* buffer we're assigning to callback */
+ 	kmutex_t	*hash_lock = NULL;
+ 	arc_callback_t	*callback_list, *acb;
+-	int		freeable = B_FALSE;
++	boolean_t	freeable = B_FALSE;
+ 
+ 	/*
+ 	 * The hdr was inserted into hash-table and removed from lists
+@@ -4279,39 +4438,47 @@ arc_read_done(zio_t *zio)
+ 		arc_access(hdr, hash_lock);
+ 	}
+ 
+-	/* create copies of the data buffer for the callers */
+-	for (acb = callback_list; acb; acb = acb->acb_next) {
+-		if (acb->acb_done != NULL) {
+-			/*
+-			 * If we're here, then this must be a demand read
+-			 * since prefetch requests don't have callbacks.
+-			 * If a read request has a callback (i.e. acb_done is
+-			 * not NULL), then we decompress the data for the
+-			 * first request and clone the rest. This avoids
+-			 * having to waste cpu resources decompressing data
+-			 * that nobody is explicitly waiting to read.
+-			 */
+-			if (abuf == NULL) {
+-				acb->acb_buf = arc_buf_alloc_impl(hdr,
+-				    acb->acb_private);
++	/* create buffers for the callers. only decompress the data once. */
++	arc_buf_t *decomp_buf = NULL;
++	int callback_cnt = 0;
++	for (acb = callback_list; acb != NULL; acb = acb->acb_next) {
++		if (!acb->acb_done)
++			continue;
++
++		/*
++		 * If we're here, then this must be a demand read
++		 * since prefetch requests don't have callbacks.
++		 * If a read request has a callback (i.e. acb_done is
++		 * not NULL), then we decompress the data for the
++		 * first request and clone the rest. This avoids
++		 * having to waste cpu resources decompressing data
++		 * that nobody is explicitly waiting to read.
++		 */
++
++		callback_cnt++;
++		if (acb->acb_compressed && !HDR_SHARED_DATA(hdr) &&
++		    HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF &&
++		    hdr->b_l1hdr.b_byteswap == DMU_BSWAP_NUMFUNCS) {
++			acb->acb_buf = arc_buf_alloc_impl(hdr,
++			    acb->acb_private, B_TRUE);
++		} else {
++			if (decomp_buf == NULL) {
++				decomp_buf = arc_buf_alloc_impl(hdr,
++				    acb->acb_private, B_FALSE);
+ 				if (zio->io_error == 0) {
+ 					zio->io_error =
+-					    arc_decompress(acb->acb_buf);
++					    arc_decompress(decomp_buf);
+ 				}
+-				abuf = acb->acb_buf;
++				acb->acb_buf = decomp_buf;
+ 			} else {
+ 				add_reference(hdr, acb->acb_private);
+-				acb->acb_buf = arc_buf_clone(abuf);
++				acb->acb_buf = arc_buf_clone(decomp_buf);
+ 			}
+ 		}
+ 	}
+ 	hdr->b_l1hdr.b_acb = NULL;
+ 	arc_hdr_clear_flags(hdr, ARC_FLAG_IO_IN_PROGRESS);
+-	if (abuf == NULL) {
+-		/*
+-		 * This buffer didn't have a callback so it must
+-		 * be a prefetch.
+-		 */
++	if (callback_cnt == 0) {
+ 		ASSERT(HDR_PREFETCH(hdr));
+ 		ASSERT0(hdr->b_l1hdr.b_bufcnt);
+ 		ASSERT3P(hdr->b_l1hdr.b_pdata, !=, NULL);
+@@ -4396,6 +4563,7 @@ arc_read(zio_t *pio, spa_t *spa, const blkptr_t *bp, arc_done_func_t *done,
+ 	kmutex_t *hash_lock = NULL;
+ 	zio_t *rzio;
+ 	uint64_t guid = spa_load_guid(spa);
++	boolean_t compressed_read = (zio_flags & ZIO_FLAG_RAW) != 0;
+ 
+ 	ASSERT(!BP_IS_EMBEDDED(bp) ||
+ 	    BPE_GET_ETYPE(bp) == BP_EMBEDDED_TYPE_DATA);
+@@ -4460,6 +4628,7 @@ top:
+ 				    KM_SLEEP);
+ 				acb->acb_done = done;
+ 				acb->acb_private = private;
++				acb->acb_compressed = compressed_read;
+ 				if (pio != NULL)
+ 					acb->acb_zio_dummy = zio_null(pio,
+ 					    spa, NULL, NULL, NULL, zio_flags);
+@@ -4495,19 +4664,43 @@ top:
+ 			ASSERT(!BP_IS_EMBEDDED(bp) || !BP_IS_HOLE(bp));
+ 
+ 			/*
+-			 * If this block is already in use, create a new
+-			 * copy of the data so that we will be guaranteed
+-			 * that arc_release() will always succeed.
++			 * If we're doing a raw read, the header hasn't been
++			 * shared yet, the header contains compressed data, and
++			 * the data does not need to be byteswapped, use the
++			 * header's b_pdata as the new buf's b_data. Otherwise,
++			 * we'll either need to clone an existing decompressed
++			 * buf or decompress the data ourselves.
+ 			 */
+-			buf = hdr->b_l1hdr.b_buf;
+-			if (buf == NULL) {
+-				ASSERT0(refcount_count(&hdr->b_l1hdr.b_refcnt));
+-				ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, ==, NULL);
+-				buf = arc_buf_alloc_impl(hdr, private);
+-				VERIFY0(arc_decompress(buf));
++			if (compressed_read && !HDR_SHARED_DATA(hdr) &&
++			    HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF &&
++			    hdr->b_l1hdr.b_byteswap == DMU_BSWAP_NUMFUNCS) {
++				buf = arc_buf_alloc_impl(hdr, private, B_TRUE);
+ 			} else {
+-				add_reference(hdr, private);
+-				buf = arc_buf_clone(buf);
++				/* search for a decompressed buf */
++				for (buf = hdr->b_l1hdr.b_buf; buf != NULL;
++				    buf = buf->b_next) {
++					if (!ARC_BUF_COMPRESSED(buf))
++						break;
++				}
++
++				if (buf == NULL) {
++					/* there could be one compressed buf */
++					IMPLY(HDR_SHARED_DATA(hdr),
++					    refcount_count(
++					    &hdr->b_l1hdr.b_refcnt) == 1);
++					/* otherwise there won't be any */
++					IMPLY(!HDR_SHARED_DATA(hdr),
++					    refcount_count(
++					    &hdr->b_l1hdr.b_refcnt) == 0);
++					ASSERT3P(hdr->b_l1hdr.b_freeze_cksum,
++					    ==, NULL);
++					buf = arc_buf_alloc_impl(hdr, private,
++					    B_FALSE);
++					VERIFY0(arc_decompress(buf));
++				} else {
++					add_reference(hdr, private);
++					buf = arc_buf_clone(buf);
++				}
+ 			}
+ 			ASSERT3P(buf->b_data, !=, NULL);
+ 
+@@ -4570,6 +4763,7 @@ top:
+ 			ASSERT(!HDR_IO_IN_PROGRESS(hdr));
+ 			ASSERT(refcount_is_zero(&hdr->b_l1hdr.b_refcnt));
+ 			ASSERT3P(hdr->b_l1hdr.b_buf, ==, NULL);
++			ASSERT3P(hdr->b_l1hdr.b_freeze_cksum, ==, NULL);
+ 
+ 			/*
+ 			 * This is a delicate dance that we play here.
+@@ -4610,6 +4804,7 @@ top:
+ 		acb = kmem_zalloc(sizeof (arc_callback_t), KM_SLEEP);
+ 		acb->acb_done = done;
+ 		acb->acb_private = private;
++		acb->acb_compressed = compressed_read;
+ 
+ 		ASSERT3P(hdr->b_l1hdr.b_acb, ==, NULL);
+ 		hdr->b_l1hdr.b_acb = acb;
+@@ -4848,7 +5043,7 @@ arc_release(arc_buf_t *buf, void *tag)
+ 	ASSERT3P(state, !=, arc_anon);
+ 
+ 	/* this buffer is not on any list */
+-	ASSERT(refcount_count(&hdr->b_l1hdr.b_refcnt) > 0);
++	ASSERT3S(refcount_count(&hdr->b_l1hdr.b_refcnt), >, 0);
+ 
+ 	if (HDR_HAS_L2HDR(hdr)) {
+ 		mutex_enter(&hdr->b_l2hdr.b_dev->l2ad_mtx);
+@@ -4872,7 +5067,6 @@ arc_release(arc_buf_t *buf, void *tag)
+ 	 */
+ 	if (hdr->b_l1hdr.b_bufcnt > 1) {
+ 		arc_buf_hdr_t *nhdr;
+-		arc_buf_t **bufp;
+ 		uint64_t spa = hdr->b_spa;
+ 		uint64_t psize = HDR_GET_PSIZE(hdr);
+ 		uint64_t lsize = HDR_GET_LSIZE(hdr);
+@@ -4883,36 +5077,15 @@ arc_release(arc_buf_t *buf, void *tag)
+ 		ASSERT(hdr->b_l1hdr.b_buf != buf || buf->b_next != NULL);
+ 		(void) remove_reference(hdr, hash_lock, tag);
+ 
+-		if (arc_buf_is_shared(buf)) {
+-			ASSERT(HDR_SHARED_DATA(hdr));
++		if (arc_buf_is_shared(buf))
+ 			ASSERT3P(hdr->b_l1hdr.b_buf, !=, buf);
+-			ASSERT(ARC_BUF_LAST(buf));
+-		}
+ 
+ 		/*
+ 		 * Pull the data off of this hdr and attach it to
+ 		 * a new anonymous hdr. Also find the last buffer
+ 		 * in the hdr's buffer list.
+ 		 */
+-		arc_buf_t *lastbuf = NULL;
+-		bufp = &hdr->b_l1hdr.b_buf;
+-		while (*bufp != NULL) {
+-			if (*bufp == buf) {
+-				*bufp = buf->b_next;
+-			}
+-
+-			/*
+-			 * If we've removed a buffer in the middle of
+-			 * the list then update the lastbuf and update
+-			 * bufp.
+-			 */
+-			if (*bufp != NULL) {
+-				lastbuf = *bufp;
+-				bufp = &(*bufp)->b_next;
+-			}
+-		}
+-		buf->b_next = NULL;
+-		ASSERT3P(lastbuf, !=, buf);
++		arc_buf_t *lastbuf = arc_buf_remove(hdr, buf);
+ 		ASSERT3P(lastbuf, !=, NULL);
+ 
+ 		/*
+@@ -4923,7 +5096,6 @@ arc_release(arc_buf_t *buf, void *tag)
+ 		 */
+ 		if (arc_buf_is_shared(buf)) {
+ 			ASSERT3P(hdr->b_l1hdr.b_buf, !=, buf);
+-			ASSERT(ARC_BUF_LAST(lastbuf));
+ 			VERIFY(!arc_buf_is_shared(lastbuf));
+ 
+ 			/*
+@@ -4933,21 +5105,46 @@ arc_release(arc_buf_t *buf, void *tag)
+ 			 * on the arc_buf_t list.
+ 			 */
+ 			arc_unshare_buf(hdr, buf);
+-			arc_share_buf(hdr, lastbuf);
++
++			/*
++			 * If the buf we removed was compressed, then
++			 * we need to allocate a new compressed block for the
++			 * hdr and copy the data over. Otherwise, the
++			 * buffer was uncompressed and we can now share
++			 * the data with the lastbuf.
++			 */
++			if (ARC_BUF_COMPRESSED(buf)) {
++				ASSERT(!ARC_BUF_COMPRESSED(lastbuf));
++				arc_hdr_alloc_pdata(hdr);
++				bcopy(buf->b_data, hdr->b_l1hdr.b_pdata, psize);
++			} else {
++				ASSERT(!ARC_BUF_COMPRESSED(lastbuf));
++				arc_share_buf(hdr, lastbuf);
++			}
+ 			VERIFY3P(lastbuf->b_data, !=, NULL);
+ 		} else if (HDR_SHARED_DATA(hdr)) {
+-			ASSERT(arc_buf_is_shared(lastbuf));
++			/*
++			 * Uncompressed shared buffers are always at the end
++			 * of the list. Compressed buffers don't have the
++			 * same requirements. This makes it hard to
++			 * simply assert that the lastbuf is shared so
++			 * we rely on the hdr's compression flags to determine
++			 * if we have a compressed, shared buffer.
++			 */
++			ASSERT(arc_buf_is_shared(lastbuf) ||
++			    HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF);
++			ASSERT(!ARC_BUF_SHARED(buf));
+ 		}
+ 		ASSERT3P(hdr->b_l1hdr.b_pdata, !=, NULL);
+ 		ASSERT3P(state, !=, arc_l2c_only);
+ 
+ 		(void) refcount_remove_many(&state->arcs_size,
+-		    HDR_GET_LSIZE(hdr), buf);
++		    arc_buf_size(buf), buf);
+ 
+ 		if (refcount_is_zero(&hdr->b_l1hdr.b_refcnt)) {
+ 			ASSERT3P(state, !=, arc_l2c_only);
+ 			(void) refcount_remove_many(&state->arcs_esize[type],
+-			    HDR_GET_LSIZE(hdr), buf);
++			    arc_buf_size(buf), buf);
+ 		}
+ 
+ 		hdr->b_l1hdr.b_bufcnt -= 1;
+@@ -4974,7 +5171,7 @@ arc_release(arc_buf_t *buf, void *tag)
+ 
+ 		mutex_exit(&buf->b_evict_lock);
+ 		(void) refcount_add_many(&arc_anon->arcs_size,
+-		    HDR_GET_LSIZE(nhdr), buf);
++		    arc_buf_size(buf), buf);
+ 	} else {
+ 		mutex_exit(&buf->b_evict_lock);
+ 		ASSERT(refcount_count(&hdr->b_l1hdr.b_refcnt) == 1);
+@@ -5030,15 +5227,13 @@ arc_write_ready(zio_t *zio)
+ 	/*
+ 	 * If we're reexecuting this zio because the pool suspended, then
+ 	 * cleanup any state that was previously set the first time the
+-	 * callback as invoked.
++	 * callback was invoked.
+ 	 */
+ 	if (zio->io_flags & ZIO_FLAG_REEXECUTED) {
+ 		arc_cksum_free(hdr);
+ 		arc_buf_unwatch(buf);
+ 		if (hdr->b_l1hdr.b_pdata != NULL) {
+ 			if (arc_buf_is_shared(buf)) {
+-				ASSERT(HDR_SHARED_DATA(hdr));
+-
+ 				arc_unshare_buf(hdr, buf);
+ 			} else {
+ 				arc_hdr_free_pdata(hdr);
+@@ -5075,19 +5270,27 @@ arc_write_ready(zio_t *zio)
+ 	 * arc thus the on-disk block may or may not match what we maintain
+ 	 * in the hdr's b_pdata field.
+ 	 */
+-	if (HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF) {
++	if (HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF &&
++	    !ARC_BUF_COMPRESSED(buf)) {
+ 		ASSERT(BP_GET_COMPRESS(zio->io_bp) != ZIO_COMPRESS_OFF);
+ 		ASSERT3U(psize, >, 0);
+ 		arc_hdr_alloc_pdata(hdr);
+ 		bcopy(zio->io_data, hdr->b_l1hdr.b_pdata, psize);
+ 	} else {
+ 		ASSERT3P(buf->b_data, ==, zio->io_orig_data);
+-		ASSERT3U(zio->io_orig_size, ==, HDR_GET_LSIZE(hdr));
++		ASSERT3U(zio->io_orig_size, ==, arc_buf_size(buf));
+ 		ASSERT3U(hdr->b_l1hdr.b_byteswap, ==, DMU_BSWAP_NUMFUNCS);
+ 		ASSERT(!HDR_SHARED_DATA(hdr));
+ 		ASSERT(!arc_buf_is_shared(buf));
+ 		ASSERT3U(hdr->b_l1hdr.b_bufcnt, ==, 1);
+ 		ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
++		if (ARC_BUF_COMPRESSED(buf)) {
++			ASSERT3U(zio->io_orig_size, ==, HDR_GET_PSIZE(hdr));
++		} else {
++			ASSERT3U(zio->io_orig_size, ==, HDR_GET_LSIZE(hdr));
++		}
++		EQUIV(HDR_GET_COMPRESS(hdr) != ZIO_COMPRESS_OFF,
++		    ARC_BUF_COMPRESSED(buf));
+ 
+ 		/*
+ 		 * This hdr is not compressed so we're able to share
+@@ -5213,6 +5416,10 @@ arc_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, arc_buf_t *buf,
+ 	ASSERT3U(hdr->b_l1hdr.b_bufcnt, >, 0);
+ 	if (l2arc)
+ 		arc_hdr_set_flags(hdr, ARC_FLAG_L2CACHE);
++	if (ARC_BUF_COMPRESSED(buf)) {
++		ASSERT3U(zp->zp_compress, !=, ZIO_COMPRESS_OFF);
++		zio_flags |= ZIO_FLAG_RAW;
++	}
+ 	callback = kmem_zalloc(sizeof (arc_write_callback_t), KM_SLEEP);
+ 	callback->awcb_ready = ready;
+ 	callback->awcb_physdone = physdone;
+@@ -5232,7 +5439,6 @@ arc_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, arc_buf_t *buf,
+ 		 * buf will take sole ownership of the block.
+ 		 */
+ 		if (arc_buf_is_shared(buf)) {
+-			ASSERT(ARC_BUF_LAST(buf));
+ 			arc_unshare_buf(hdr, buf);
+ 		} else {
+ 			arc_hdr_free_pdata(hdr);
+@@ -5243,7 +5449,8 @@ arc_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, arc_buf_t *buf,
+ 	ASSERT(!arc_buf_is_shared(buf));
+ 	ASSERT3P(hdr->b_l1hdr.b_pdata, ==, NULL);
+ 
+-	zio = zio_write(pio, spa, txg, bp, buf->b_data, HDR_GET_LSIZE(hdr), zp,
++	zio = zio_write(pio, spa, txg, bp, buf->b_data,
++	    HDR_GET_LSIZE(hdr), arc_buf_size(buf), zp,
+ 	    arc_write_ready, arc_write_physdone, arc_write_done, callback,
+ 	    priority, zio_flags, zb);
+ 
+diff --git a/usr/src/uts/common/fs/zfs/dbuf.c b/usr/src/uts/common/fs/zfs/dbuf.c
+index ce3db95..4061640 100644
+--- a/usr/src/uts/common/fs/zfs/dbuf.c
++++ b/usr/src/uts/common/fs/zfs/dbuf.c
+@@ -804,7 +804,7 @@ dbuf_loan_arcbuf(dmu_buf_impl_t *db)
+ 		spa_t *spa = db->db_objset->os_spa;
+ 
+ 		mutex_exit(&db->db_mtx);
+-		abuf = arc_loan_buf(spa, blksz);
++		abuf = arc_loan_buf(spa, B_FALSE, blksz);
+ 		bcopy(db->db.db_data, abuf->b_data, blksz);
+ 	} else {
+ 		abuf = db->db_buf;
+@@ -899,9 +899,9 @@ mooch_read_done(zio_t *zio)
+ 	ASSERT3U(mra->mra_clone_db->db.db_size, ==,
+ 	    mra->mra_origin_db->db.db_size);
+ 
+-	arc_buf_t *abuf = arc_alloc_buf(zio->io_spa,
+-	    mra->mra_clone_db->db.db_size, mra->mra_clone_db,
+-	    DBUF_GET_BUFC_TYPE(mra->mra_clone_db));
++	arc_buf_t *abuf = arc_alloc_buf(zio->io_spa, mra->mra_clone_db,
++	    DBUF_GET_BUFC_TYPE(mra->mra_clone_db),
++	    mra->mra_clone_db->db.db_size);
+ 
+ 	if (zio->io_error == 0) {
+ 		mooch_byteswap_reconstruct(&mra->mra_origin_db->db,
+@@ -1020,8 +1020,8 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
+ 		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
+ 
+ 		DB_DNODE_EXIT(db);
+-		dbuf_set_data(db, arc_alloc_buf(db->db_objset->os_spa,
+-		    db->db.db_size, db, type));
++		dbuf_set_data(db, arc_alloc_buf(db->db_objset->os_spa, db, type,
++		    db->db.db_size));
+ 		bzero(db->db.db_data, db->db.db_size);
+ 		db->db_state = DB_CACHED;
+ 		mutex_exit(&db->db_mtx);
+@@ -1056,6 +1056,68 @@ dbuf_read_impl(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
+ 	    &aflags, &zb);
+ }
+ 
++/*
++ * This is our just-in-time copy function.  It makes a copy of buffers that
++ * have been modified in a previous transaction group before we access them in
++ * the current active group.
++ *
++ * This function is used in three places: when we are dirtying a buffer for the
++ * first time in a txg, when we are freeing a range in a dnode that includes
++ * this buffer, and when we are accessing a buffer which was received compressed
++ * and later referenced in a WRITE_BYREF record.
++ *
++ * Note that when we are called from dbuf_free_range() we do not put a hold on
++ * the buffer, we just traverse the active dbuf list for the dnode.
++ */
++static void
++dbuf_fix_old_data(dmu_buf_impl_t *db, uint64_t txg)
++{
++	dbuf_dirty_record_t *dr = db->db_last_dirty;
++
++	ASSERT(MUTEX_HELD(&db->db_mtx));
++	ASSERT(db->db.db_data != NULL);
++	ASSERT(db->db_level == 0);
++	ASSERT(db->db.db_object != DMU_META_DNODE_OBJECT);
++
++	if (dr == NULL ||
++	    (dr->dt.dl.dr_data !=
++	    ((db->db_blkid  == DMU_BONUS_BLKID) ? db->db.db_data : db->db_buf)))
++		return;
++
++	/*
++	 * If the last dirty record for this dbuf has not yet synced
++	 * and its referencing the dbuf data, either:
++	 *	reset the reference to point to a new copy,
++	 * or (if there a no active holders)
++	 *	just null out the current db_data pointer.
++	 */
++	ASSERT(dr->dr_txg >= txg - 2);
++	if (db->db_blkid == DMU_BONUS_BLKID) {
++		/* Note that the data bufs here are zio_bufs */
++		dr->dt.dl.dr_data = zio_buf_alloc(DN_MAX_BONUSLEN);
++		arc_space_consume(DN_MAX_BONUSLEN, ARC_SPACE_OTHER);
++		bcopy(db->db.db_data, dr->dt.dl.dr_data, DN_MAX_BONUSLEN);
++	} else if (refcount_count(&db->db_holds) > db->db_dirtycnt) {
++		int size = arc_buf_size(db->db_buf);
++		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
++		spa_t *spa = db->db_objset->os_spa;
++		enum zio_compress compress_type =
++		    arc_get_compression(db->db_buf);
++
++		if (compress_type == ZIO_COMPRESS_OFF) {
++			dr->dt.dl.dr_data = arc_alloc_buf(spa, db, type, size);
++		} else {
++			ASSERT3U(type, ==, ARC_BUFC_DATA);
++			dr->dt.dl.dr_data = arc_alloc_compressed_buf(spa, db,
++			    size, arc_buf_lsize(db->db_buf), compress_type);
++		}
++		bcopy(db->db.db_data, dr->dt.dl.dr_data->b_data, size);
++	} else {
++		db->db_buf = NULL;
++		dbuf_clear_data(db);
++	}
++}
++
+ int
+ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
+ {
+@@ -1084,6 +1146,18 @@ dbuf_read(dmu_buf_impl_t *db, zio_t *zio, uint32_t flags)
+ 
+ 	mutex_enter(&db->db_mtx);
+ 	if (db->db_state == DB_CACHED) {
++		/*
++		 * If the arc buf is compressed, we need to decompress it to
++		 * read the data. This could happen during the "zfs receive" of
++		 * a stream which is compressed and deduplicated.
++		 */
++		if (db->db_buf != NULL &&
++		    arc_get_compression(db->db_buf) != ZIO_COMPRESS_OFF) {
++			dbuf_fix_old_data(db,
++			    spa_syncing_txg(dmu_objset_spa(db->db_objset)));
++			err = arc_decompress(db->db_buf);
++			dbuf_set_data(db, db->db_buf);
++		}
+ 		mutex_exit(&db->db_mtx);
+ 		if (prefetch)
+ 			dmu_zfetch(&dn->dn_zfetch, db->db_blkid, 1);
+@@ -1159,7 +1233,7 @@ dbuf_noread(dmu_buf_impl_t *db)
+ 
+ 		ASSERT(db->db_buf == NULL);
+ 		ASSERT(db->db.db_data == NULL);
+-		dbuf_set_data(db, arc_alloc_buf(spa, db->db.db_size, db, type));
++		dbuf_set_data(db, arc_alloc_buf(spa, db, type, db->db.db_size));
+ 		db->db_state = DB_FILL;
+ 	} else if (db->db_state == DB_NOFILL) {
+ 		dbuf_clear_data(db);
+@@ -1169,60 +1243,6 @@ dbuf_noread(dmu_buf_impl_t *db)
+ 	mutex_exit(&db->db_mtx);
+ }
+ 
+-/*
+- * This is our just-in-time copy function.  It makes a copy of
+- * buffers, that have been modified in a previous transaction
+- * group, before we modify them in the current active group.
+- *
+- * This function is used in two places: when we are dirtying a
+- * buffer for the first time in a txg, and when we are freeing
+- * a range in a dnode that includes this buffer.
+- *
+- * Note that when we are called from dbuf_free_range() we do
+- * not put a hold on the buffer, we just traverse the active
+- * dbuf list for the dnode.
+- */
+-static void
+-dbuf_fix_old_data(dmu_buf_impl_t *db, uint64_t txg)
+-{
+-	dbuf_dirty_record_t *dr = db->db_last_dirty;
+-
+-	ASSERT(MUTEX_HELD(&db->db_mtx));
+-	ASSERT(db->db.db_data != NULL);
+-	ASSERT(db->db_level == 0);
+-	ASSERT(db->db.db_object != DMU_META_DNODE_OBJECT);
+-
+-	if (dr == NULL ||
+-	    (dr->dt.dl.dr_data !=
+-	    ((db->db_blkid  == DMU_BONUS_BLKID) ? db->db.db_data : db->db_buf)))
+-		return;
+-
+-	/*
+-	 * If the last dirty record for this dbuf has not yet synced
+-	 * and its referencing the dbuf data, either:
+-	 *	reset the reference to point to a new copy,
+-	 * or (if there a no active holders)
+-	 *	just null out the current db_data pointer.
+-	 */
+-	ASSERT(dr->dr_txg >= txg - 2);
+-	if (db->db_blkid == DMU_BONUS_BLKID) {
+-		/* Note that the data bufs here are zio_bufs */
+-		dr->dt.dl.dr_data = zio_buf_alloc(DN_MAX_BONUSLEN);
+-		arc_space_consume(DN_MAX_BONUSLEN, ARC_SPACE_OTHER);
+-		bcopy(db->db.db_data, dr->dt.dl.dr_data, DN_MAX_BONUSLEN);
+-	} else if (refcount_count(&db->db_holds) > db->db_dirtycnt) {
+-		int size = db->db.db_size;
+-		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
+-		spa_t *spa = db->db_objset->os_spa;
+-
+-		dr->dt.dl.dr_data = arc_alloc_buf(spa, size, db, type);
+-		bcopy(db->db.db_data, dr->dt.dl.dr_data->b_data, size);
+-	} else {
+-		db->db_buf = NULL;
+-		dbuf_clear_data(db);
+-	}
+-}
+-
+ void
+ dbuf_unoverride(dbuf_dirty_record_t *dr)
+ {
+@@ -1445,7 +1465,7 @@ dbuf_new_size(dmu_buf_impl_t *db, int size, dmu_tx_t *tx)
+ 	dmu_buf_will_dirty(&db->db, tx);
+ 
+ 	/* create the data buffer for the new block */
+-	buf = arc_alloc_buf(dn->dn_objset->os_spa, size, db, type);
++	buf = arc_alloc_buf(dn->dn_objset->os_spa, db, type, size);
+ 
+ 	/* copy old block data to the new block */
+ 	obuf = db->db_buf;
+@@ -2082,9 +2102,9 @@ dbuf_assign_arcbuf(dmu_buf_impl_t *db, arc_buf_t *buf, dmu_tx_t *tx)
+ 	ASSERT(!refcount_is_zero(&db->db_holds));
+ 	ASSERT(db->db_blkid != DMU_BONUS_BLKID);
+ 	ASSERT(db->db_level == 0);
+-	ASSERT(DBUF_GET_BUFC_TYPE(db) == ARC_BUFC_DATA);
++	ASSERT3U(dbuf_is_metadata(db), ==, arc_is_metadata(buf));
+ 	ASSERT(buf != NULL);
+-	ASSERT(arc_buf_size(buf) == db->db.db_size);
++	ASSERT(arc_buf_lsize(buf) == db->db.db_size);
+ 	ASSERT(tx->tx_txg != 0);
+ 
+ 	arc_return_buf(buf, db);
+@@ -2754,8 +2774,8 @@ top:
+ 			arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
+ 
+ 			dbuf_set_data(db,
+-			    arc_alloc_buf(dn->dn_objset->os_spa,
+-			    db->db.db_size, db, type));
++			    arc_alloc_buf(dn->dn_objset->os_spa, db, type,
++			    db->db.db_size));
+ 			bcopy(dr->dt.dl.dr_data->b_data, db->db.db_data,
+ 			    db->db.db_size);
+ 		}
+@@ -3302,10 +3322,19 @@ dbuf_sync_leaf(dbuf_dirty_record_t *dr, dmu_tx_t *tx)
+ 		 * objects only modified in the syncing context (e.g.
+ 		 * DNONE_DNODE blocks).
+ 		 */
+-		int blksz = arc_buf_size(*datap);
++		int psize = arc_buf_size(*datap);
+ 		arc_buf_contents_t type = DBUF_GET_BUFC_TYPE(db);
+-		*datap = arc_alloc_buf(os->os_spa, blksz, db, type);
+-		bcopy(db->db.db_data, (*datap)->b_data, blksz);
++		enum zio_compress compress_type = arc_get_compression(*datap);
++
++		if (compress_type == ZIO_COMPRESS_OFF) {
++			*datap = arc_alloc_buf(os->os_spa, db, type, psize);
++		} else {
++			ASSERT3U(type, ==, ARC_BUFC_DATA);
++			int lsize = arc_buf_lsize(*datap);
++			*datap = arc_alloc_compressed_buf(os->os_spa, db,
++			    psize, lsize, compress_type);
++		}
++		bcopy(db->db.db_data, (*datap)->b_data, psize);
+ 	}
+ 	db->db_data_pending = dr;
+ 
+@@ -3808,7 +3837,9 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
+ 		wp_flag = WP_SPILL;
+ 	wp_flag |= (db->db_state == DB_NOFILL) ? WP_NOFILL : 0;
+ 
+-	dmu_write_policy(os, dn, db->db_level, wp_flag, &zp);
++	dmu_write_policy(os, dn, db->db_level, wp_flag,
++	    (data != NULL && arc_get_compression(data) != ZIO_COMPRESS_OFF) ?
++	    arc_get_compression(data) : ZIO_COMPRESS_INHERIT, &zp);
+ 	DB_DNODE_EXIT(db);
+ 
+ 	/*
+@@ -3827,8 +3858,8 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
+ 		 */
+ 		void *contents = (data != NULL) ? data->b_data : NULL;
+ 
+-		dr->dr_zio = zio_write(zio, os->os_spa, txg,
+-		    &dr->dr_bp_copy, contents, db->db.db_size, &zp,
++		dr->dr_zio = zio_write(zio, os->os_spa, txg, &dr->dr_bp_copy,
++		    contents, db->db.db_size, db->db.db_size, &zp,
+ 		    dbuf_write_override_ready, NULL, dbuf_write_override_done,
+ 		    dr, ZIO_PRIORITY_ASYNC_WRITE, ZIO_FLAG_MUSTSUCCEED, &zb);
+ 		mutex_enter(&db->db_mtx);
+@@ -3840,7 +3871,7 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
+ 		ASSERT(zp.zp_checksum == ZIO_CHECKSUM_OFF ||
+ 		    zp.zp_checksum == ZIO_CHECKSUM_NOPARITY);
+ 		dr->dr_zio = zio_write(zio, os->os_spa, txg,
+-		    &dr->dr_bp_copy, NULL, db->db.db_size, &zp,
++		    &dr->dr_bp_copy, NULL, db->db.db_size, db->db.db_size, &zp,
+ 		    dbuf_write_nofill_ready, NULL, dbuf_write_nofill_done, db,
+ 		    ZIO_PRIORITY_ASYNC_WRITE,
+ 		    ZIO_FLAG_MUSTSUCCEED | ZIO_FLAG_NODATA, &zb);
+diff --git a/usr/src/uts/common/fs/zfs/dmu.c b/usr/src/uts/common/fs/zfs/dmu.c
+index dc54c47..655bf66 100644
+--- a/usr/src/uts/common/fs/zfs/dmu.c
++++ b/usr/src/uts/common/fs/zfs/dmu.c
+@@ -1076,7 +1076,7 @@ dmu_xuio_add(xuio_t *xuio, arc_buf_t *abuf, offset_t off, size_t n)
+ 	int i = priv->next++;
+ 
+ 	ASSERT(i < priv->cnt);
+-	ASSERT(off + n <= arc_buf_size(abuf));
++	ASSERT(off + n <= arc_buf_lsize(abuf));
+ 	iov = uio->uio_iov + i;
+ 	iov->iov_base = (char *)abuf->b_data + off;
+ 	iov->iov_len = n;
+@@ -1422,7 +1422,7 @@ dmu_request_arcbuf(dmu_buf_t *handle, int size)
+ {
+ 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)handle;
+ 
+-	return (arc_loan_buf(db->db_objset->os_spa, size));
++	return (arc_loan_buf(db->db_objset->os_spa, B_FALSE, size));
+ }
+ 
+ /*
+@@ -1447,7 +1447,7 @@ dmu_assign_arcbuf(dmu_buf_t *handle, uint64_t offset, arc_buf_t *buf,
+ 	dmu_buf_impl_t *dbuf = (dmu_buf_impl_t *)handle;
+ 	dnode_t *dn;
+ 	dmu_buf_impl_t *db;
+-	uint32_t blksz = (uint32_t)arc_buf_size(buf);
++	uint32_t blksz = (uint32_t)arc_buf_lsize(buf);
+ 	uint64_t blkid;
+ 
+ 	DB_DNODE_ENTER(dbuf);
+@@ -1460,18 +1460,19 @@ dmu_assign_arcbuf(dmu_buf_t *handle, uint64_t offset, arc_buf_t *buf,
+ 
+ 	/*
+ 	 * We can only assign if the offset is aligned, the arc buf is the
+-	 * same size as the dbuf, and the dbuf is not metadata.  It
+-	 * can't be metadata because the loaned arc buf comes from the
+-	 * user-data kmem arena.
++	 * same size as the dbuf, and the dbuf is not metadata.
+ 	 */
+-	if (offset == db->db.db_offset && blksz == db->db.db_size &&
+-	    DBUF_GET_BUFC_TYPE(db) == ARC_BUFC_DATA) {
++	if (offset == db->db.db_offset && blksz == db->db.db_size) {
+ 		dbuf_assign_arcbuf(db, buf, tx);
+ 		dbuf_rele(db, FTAG);
+ 	} else {
+ 		objset_t *os;
+ 		uint64_t object;
+ 
++		/* compressed bufs must always be assignable to their dbuf */
++		ASSERT3U(arc_get_compression(buf), ==, ZIO_COMPRESS_OFF);
++		ASSERT(!(buf->b_prop_flags & ARC_BUF_FLAG_COMPRESSED));
++
+ 		DB_DNODE_ENTER(dbuf);
+ 		dn = DB_DNODE(dbuf);
+ 		os = dn->dn_objset;
+@@ -1622,9 +1623,9 @@ dmu_sync_late_arrival(zio_t *pio, objset_t *os, dmu_sync_cb_t *done, zgd_t *zgd,
+ 	dsa->dsa_tx = tx;
+ 
+ 	zio_nowait(zio_write(pio, os->os_spa, dmu_tx_get_txg(tx), zgd->zgd_bp,
+-	    zgd->zgd_db->db_data, zgd->zgd_db->db_size, zp,
+-	    dmu_sync_late_arrival_ready, NULL, dmu_sync_late_arrival_done, dsa,
+-	    ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, zb));
++	    zgd->zgd_db->db_data, zgd->zgd_db->db_size, zgd->zgd_db->db_size,
++	    zp, dmu_sync_late_arrival_ready, NULL, dmu_sync_late_arrival_done,
++	    dsa, ZIO_PRIORITY_SYNC_WRITE, ZIO_FLAG_CANFAIL, zb));
+ 
+ 	return (0);
+ }
+@@ -1675,7 +1676,8 @@ dmu_sync(zio_t *pio, uint64_t txg, dmu_sync_cb_t *done, zgd_t *zgd)
+ 
+ 	DB_DNODE_ENTER(db);
+ 	dn = DB_DNODE(db);
+-	dmu_write_policy(os, dn, db->db_level, WP_DMU_SYNC, &zp);
++	dmu_write_policy(os, dn, db->db_level, WP_DMU_SYNC,
++	    ZIO_COMPRESS_INHERIT, &zp);
+ 	DB_DNODE_EXIT(db);
+ 
+ 	/*
+@@ -1845,7 +1847,8 @@ int zfs_mdcomp_disable = 0;
+ int zfs_redundant_metadata_most_ditto_level = 2;
+ 
+ void
+-dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
++dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp,
++    enum zio_compress override_compress, zio_prop_t *zp)
+ {
+ 	dmu_object_type_t type = dn ? dn->dn_type : DMU_OT_OBJSET;
+ 	boolean_t ismd = (level > 0 || DMU_OT_IS_METADATA(type) ||
+@@ -1857,6 +1860,10 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
+ 	boolean_t nopwrite = B_FALSE;
+ 	boolean_t dedup_verify = os->os_dedup_verify;
+ 	int copies = os->os_copies;
++	boolean_t lz4_ac = spa_feature_is_active(os->os_spa,
++	    SPA_FEATURE_LZ4_COMPRESS);
++
++	IMPLY(override_compress == ZIO_COMPRESS_LZ4, lz4_ac);
+ 
+ 	/*
+ 	 * We maintain different write policies for each of the following
+@@ -1870,9 +1877,6 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
+ 		 * XXX -- we should design a compression algorithm
+ 		 * that specializes in arrays of bps.
+ 		 */
+-		boolean_t lz4_ac = spa_feature_is_active(os->os_spa,
+-		    SPA_FEATURE_LZ4_COMPRESS);
+-
+ 		if (zfs_mdcomp_disable) {
+ 			compress = ZIO_COMPRESS_EMPTY;
+ 		} else if (lz4_ac) {
+@@ -1947,7 +1951,16 @@ dmu_write_policy(objset_t *os, dnode_t *dn, int level, int wp, zio_prop_t *zp)
+ 	}
+ 
+ 	zp->zp_checksum = checksum;
+-	zp->zp_compress = compress;
++
++	/*
++	 * If we're writing a pre-compressed buffer, the compression type we use
++	 * must match the data. If it hasn't been compressed yet, then we should
++	 * use the value dictated by the policies above.
++	 */
++	zp->zp_compress = override_compress != ZIO_COMPRESS_INHERIT
++	    ? override_compress : compress;
++	ASSERT3U(zp->zp_compress, !=, ZIO_COMPRESS_INHERIT);
++
+ 	zp->zp_type = (wp & WP_SPILL) ? dn->dn_bonustype : type;
+ 	zp->zp_level = level;
+ 	zp->zp_copies = MIN(copies, spa_max_replication(os->os_spa));
+diff --git a/usr/src/uts/common/fs/zfs/dmu_objset.c b/usr/src/uts/common/fs/zfs/dmu_objset.c
+index 90d0b0e..7bd7f6d 100644
+--- a/usr/src/uts/common/fs/zfs/dmu_objset.c
++++ b/usr/src/uts/common/fs/zfs/dmu_objset.c
+@@ -334,9 +334,8 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
+ 		/* Increase the blocksize if we are permitted. */
+ 		if (spa_version(spa) >= SPA_VERSION_USERSPACE &&
+ 		    arc_buf_size(os->os_phys_buf) < sizeof (objset_phys_t)) {
+-			arc_buf_t *buf = arc_alloc_buf(spa,
+-			    sizeof (objset_phys_t), &os->os_phys_buf,
+-			    ARC_BUFC_METADATA);
++			arc_buf_t *buf = arc_alloc_buf(spa, &os->os_phys_buf,
++			    ARC_BUFC_METADATA, sizeof (objset_phys_t));
+ 			bzero(buf->b_data, sizeof (objset_phys_t));
+ 			bcopy(os->os_phys_buf->b_data, buf->b_data,
+ 			    arc_buf_size(os->os_phys_buf));
+@@ -349,8 +348,8 @@ dmu_objset_open_impl(spa_t *spa, dsl_dataset_t *ds, blkptr_t *bp,
+ 	} else {
+ 		int size = spa_version(spa) >= SPA_VERSION_USERSPACE ?
+ 		    sizeof (objset_phys_t) : OBJSET_OLD_PHYS_SIZE;
+-		os->os_phys_buf = arc_alloc_buf(spa, size,
+-		    &os->os_phys_buf, ARC_BUFC_METADATA);
++		os->os_phys_buf = arc_alloc_buf(spa, &os->os_phys_buf,
++		    ARC_BUFC_METADATA, size);
+ 		os->os_phys = os->os_phys_buf->b_data;
+ 		bzero(os->os_phys, size);
+ 	}
+@@ -1334,7 +1333,7 @@ dmu_objset_sync(objset_t *os, zio_t *pio, dmu_tx_t *tx)
+ 	    ZB_ROOT_OBJECT, ZB_ROOT_LEVEL, ZB_ROOT_BLKID);
+ 	arc_release(os->os_phys_buf, &os->os_phys_buf);
+ 
+-	dmu_write_policy(os, NULL, 0, 0, &zp);
++	dmu_write_policy(os, NULL, 0, 0, ZIO_COMPRESS_INHERIT, &zp);
+ 
+ 	zio = arc_write(pio, os->os_spa, tx->tx_txg,
+ 	    blkptr_copy, os->os_phys_buf, DMU_OS_IS_L2CACHEABLE(os),
+diff --git a/usr/src/uts/common/fs/zfs/dmu_send.c b/usr/src/uts/common/fs/zfs/dmu_send.c
+index d6b5787..469e763 100644
+--- a/usr/src/uts/common/fs/zfs/dmu_send.c
++++ b/usr/src/uts/common/fs/zfs/dmu_send.c
+@@ -378,8 +378,10 @@ dump_free(dmu_sendarg_t *dsp, uint64_t object, uint64_t offset,
+ 
+ static int
+ dump_write(dmu_sendarg_t *dsp, dmu_object_type_t type,
+-    uint64_t object, uint64_t offset, int blksz, const blkptr_t *bp, void *data)
++    uint64_t object, uint64_t offset, int lsize, int psize, const blkptr_t *bp,
++    void *data)
+ {
++	uint64_t payload_size;
+ 	struct drr_write *drrw = &(dsp->dsa_drr->drr_u.drr_write);
+ 
+ 	/*
+@@ -390,7 +392,7 @@ dump_write(dmu_sendarg_t *dsp, dmu_object_type_t type,
+ 	    (object == dsp->dsa_last_data_object &&
+ 	    offset > dsp->dsa_last_data_offset));
+ 	dsp->dsa_last_data_object = object;
+-	dsp->dsa_last_data_offset = offset + blksz - 1;
++	dsp->dsa_last_data_offset = offset + lsize - 1;
+ 
+ 	/*
+ 	 * If there is any kind of pending aggregation (currently either
+@@ -409,8 +411,26 @@ dump_write(dmu_sendarg_t *dsp, dmu_object_type_t type,
+ 	drrw->drr_object = object;
+ 	drrw->drr_type = type;
+ 	drrw->drr_offset = offset;
+-	drrw->drr_length = blksz;
+ 	drrw->drr_toguid = dsp->dsa_toguid;
++	drrw->drr_logical_size = lsize;
++
++	/* only set the compression fields if the buf is compressed */
++	if (lsize != psize) {
++		ASSERT(dsp->dsa_featureflags & DMU_BACKUP_FEATURE_COMPRESSED);
++		ASSERT(!BP_IS_EMBEDDED(bp));
++		ASSERT(!BP_SHOULD_BYTESWAP(bp));
++		ASSERT(!DMU_OT_IS_METADATA(BP_GET_TYPE(bp)));
++		ASSERT3U(BP_GET_COMPRESS(bp), !=, ZIO_COMPRESS_OFF);
++		ASSERT3S(psize, >, 0);
++		ASSERT3S(lsize, >=, psize);
++
++		drrw->drr_compressiontype = BP_GET_COMPRESS(bp);
++		drrw->drr_compressed_size = psize;
++		payload_size = drrw->drr_compressed_size;
++	} else {
++		payload_size = drrw->drr_logical_size;
++	}
++
+ 	if (bp == NULL || BP_IS_EMBEDDED(bp)) {
+ 		/*
+ 		 * There's no pre-computed checksum for partial-block
+@@ -430,7 +450,7 @@ dump_write(dmu_sendarg_t *dsp, dmu_object_type_t type,
+ 		drrw->drr_key.ddk_cksum = bp->blk_cksum;
+ 	}
+ 
+-	if (dump_record(dsp, data, blksz) != 0)
++	if (dump_record(dsp, data, payload_size) != 0)
+ 		return (SET_ERROR(EINTR));
+ 	return (0);
+ }
+@@ -605,7 +625,7 @@ backup_do_embed(dmu_sendarg_t *dsp, const blkptr_t *bp)
+ 	 * Compression function must be legacy, or explicitly enabled.
+ 	 */
+ 	if ((BP_GET_COMPRESS(bp) >= ZIO_COMPRESS_LEGACY_FUNCTIONS &&
+-	    !(dsp->dsa_featureflags & DMU_BACKUP_FEATURE_EMBED_DATA_LZ4)))
++	    !(dsp->dsa_featureflags & DMU_BACKUP_FEATURE_LZ4)))
+ 		return (B_FALSE);
+ 
+ 	/*
+@@ -718,6 +738,34 @@ do_dump(dmu_sendarg_t *dsa, struct send_block_record *data)
+ 		arc_buf_t *abuf;
+ 		uint64_t offset;
+ 
++		/*
++		 * If we have large blocks stored on disk but the send flags
++		 * don't allow us to send large blocks, we split the data from
++		 * the arc buf into chunks.
++		 */
++		boolean_t split_large_blocks =
++		    data->datablksz > SPA_OLD_MAXBLOCKSIZE &&
++		    !(dsa->dsa_featureflags & DMU_BACKUP_FEATURE_LARGE_BLOCKS);
++		/*
++		 * We should only request compressed data from the ARC if all
++		 * the following are true:
++		 *  - stream compression was requested
++		 *  - we aren't splitting large blocks into smaller chunks
++		 *  - the data won't need to be byteswapped before sending
++		 *  - this isn't an embedded block
++		 *  - this isn't metadata (if receiving on a different endian
++		 *    system it can be byteswapped more easily)
++		 */
++		boolean_t request_compressed =
++		    (dsa->dsa_featureflags & DMU_BACKUP_FEATURE_COMPRESSED) &&
++		    !split_large_blocks && !BP_SHOULD_BYTESWAP(bp) &&
++		    !BP_IS_EMBEDDED(bp) && !DMU_OT_IS_METADATA(BP_GET_TYPE(bp));
++
++		ASSERT0(zb->zb_level);
++		ASSERT(zb->zb_object > dsa->dsa_resume_object ||
++		    (zb->zb_object == dsa->dsa_resume_object &&
++		    zb->zb_blkid * data->datablksz >= dsa->dsa_resume_offset));
++
+ 		ASSERT0(zb->zb_level);
+ 		ASSERT(zb->zb_object > dsa->dsa_resume_object ||
+ 		    (zb->zb_object == dsa->dsa_resume_object &&
+@@ -738,23 +786,28 @@ do_dump(dmu_sendarg_t *dsa, struct send_block_record *data)
+ 			    0);
+ 			ASSERT3U(data->datablksz, ==, origin_db->db_size);
+ 			if (err == 0) {
+-				abuf = arc_alloc_buf(spa, origin_db->db_size,
+-				    &abuf, ARC_BUFC_DATA);
++				abuf = arc_alloc_buf(spa, &abuf, ARC_BUFC_DATA,
++				    origin_db->db_size);
+ 				mooch_byteswap_reconstruct(origin_db,
+ 				    abuf->b_data, bp);
+ 				dmu_buf_rele(origin_db, FTAG);
+ 			}
+ 		} else {
++			enum zio_flag zioflags = ZIO_FLAG_CANFAIL;
++
+ 			ASSERT3U(data->datablksz, ==, BP_GET_LSIZE(bp));
++
++			if (request_compressed)
++				zioflags |= ZIO_FLAG_RAW;
++
+ 			err = arc_read(NULL, spa, bp, arc_getbuf_func, &abuf,
+-			    ZIO_PRIORITY_ASYNC_READ, ZIO_FLAG_CANFAIL,
+-			    &aflags, zb);
++			    ZIO_PRIORITY_ASYNC_READ, zioflags, &aflags, zb);
+ 		}
+ 		if (err != 0) {
+ 			if (zfs_send_corrupt_data) {
+ 				/* Send a block filled with 0x"zfs badd bloc" */
+-				abuf = arc_alloc_buf(spa, data->datablksz,
+-				    &abuf, ARC_BUFC_DATA);
++				abuf = arc_alloc_buf(spa, &abuf, ARC_BUFC_DATA,
++				    data->datablksz);
+ 				uint64_t *ptr;
+ 				for (ptr = abuf->b_data;
+ 				    (char *)ptr < (char *)abuf->b_data +
+@@ -767,22 +820,23 @@ do_dump(dmu_sendarg_t *dsa, struct send_block_record *data)
+ 
+ 		offset = zb->zb_blkid * data->datablksz;
+ 
+-		if (!(dsa->dsa_featureflags &
+-		    DMU_BACKUP_FEATURE_LARGE_BLOCKS) &&
+-		    data->datablksz > SPA_OLD_MAXBLOCKSIZE) {
++		if (split_large_blocks) {
++			ASSERT3U(arc_get_compression(abuf), ==,
++			    ZIO_COMPRESS_OFF);
+ 			char *buf = abuf->b_data;
+ 			while (data->datablksz > 0 && err == 0) {
+ 				int n = MIN(data->datablksz,
+ 				    SPA_OLD_MAXBLOCKSIZE);
+ 				err = dump_write(dsa, type, zb->zb_object,
+-				    offset, n, NULL, buf);
++				    offset, n, n, NULL, buf);
+ 				offset += n;
+ 				buf += n;
+ 				data->datablksz -= n;
+ 			}
+ 		} else {
+-			err = dump_write(dsa, type, zb->zb_object,
+-			    offset, data->datablksz, bp, abuf->b_data);
++			err = dump_write(dsa, type, zb->zb_object, offset,
++			    data->datablksz, arc_buf_size(abuf), bp,
++			    abuf->b_data);
+ 		}
+ 		arc_buf_destroy(abuf, &abuf);
+ 	}
+@@ -2613,8 +2667,9 @@ redact_snaps_contains(uint64_t *snaps, uint64_t num_snaps, uint64_t guid)
+ static int
+ dmu_send_impl(void *tag, dsl_pool_t *dp, const char *tosnap,
+     dsl_dataset_t *to_ds, dsl_dataset_t *from_ds,
+-    zfs_bookmark_phys_t *ancestor_zb, boolean_t is_clone, boolean_t embedok,
+-    boolean_t large_block_ok, int outfd, uint64_t resumeobj, uint64_t resumeoff,
++    zfs_bookmark_phys_t *ancestor_zb, boolean_t is_clone,
++    boolean_t embedok, boolean_t large_block_ok, boolean_t compressok,
++    int outfd, uint64_t resumeobj, uint64_t resumeoff,
+     dsl_dataset_t **redactsnaparr, uint32_t numredactsnaps,
+     const char *redactbook, vnode_t *vp, offset_t *off)
+ {
+@@ -2669,8 +2724,14 @@ dmu_send_impl(void *tag, dsl_pool_t *dp, const char *tosnap,
+ 	if (embedok &&
+ 	    spa_feature_is_active(dp->dp_spa, SPA_FEATURE_EMBEDDED_DATA)) {
+ 		featureflags |= DMU_BACKUP_FEATURE_EMBED_DATA;
+-		if (spa_feature_is_active(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
+-			featureflags |= DMU_BACKUP_FEATURE_EMBED_DATA_LZ4;
++	}
++	if (compressok) {
++		featureflags |= DMU_BACKUP_FEATURE_COMPRESSED;
++	}
++	if ((featureflags &
++	    (DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_COMPRESSED)) !=
++	    0 && spa_feature_is_active(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS)) {
++		featureflags |= DMU_BACKUP_FEATURE_LZ4;
+ 	}
+ 
+ 	/*
+@@ -3281,7 +3342,7 @@ fini:
+ 
+ int
+ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
+-    boolean_t embedok, boolean_t large_block_ok,
++    boolean_t embedok, boolean_t large_block_ok, boolean_t compressok,
+     int outfd, vnode_t *vp, offset_t *off)
+ {
+ 	dsl_pool_t *dp;
+@@ -3327,15 +3388,15 @@ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
+ 		}
+ 
+ 		err = dmu_send_impl(FTAG, dp, NULL, ds, fromds, &zb, is_clone,
+-		    embedok, large_block_ok, outfd, 0, 0, NULL, 0, NULL, vp,
+-		    off);
++		    embedok, large_block_ok, compressok, outfd, 0, 0, NULL, 0,
++		    NULL, vp, off);
+ 
+ 		if (fromds != NULL)
+ 			dsl_dataset_rele(fromds, FTAG);
+ 	} else {
+ 		err = dmu_send_impl(FTAG, dp, NULL, ds, NULL, NULL, B_FALSE,
+-		    embedok, large_block_ok, outfd, 0, 0, NULL, 0, NULL, vp,
+-		    off);
++		    embedok, large_block_ok, compressok, outfd, 0, 0, NULL, 0,
++		    NULL, vp, off);
+ 	}
+ 	dsl_dataset_rele(ds, FTAG);
+ 	return (err);
+@@ -3343,7 +3404,8 @@ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
+ 
+ int
+ dmu_send(const char *tosnap, const char *fromsnap, boolean_t embedok,
+-    boolean_t large_block_ok, int outfd, uint64_t resumeobj, uint64_t resumeoff,
++    boolean_t large_block_ok, boolean_t compressok, int outfd,
++    uint64_t resumeobj, uint64_t resumeoff,
+     nvlist_t *redactsnaps, const char *redactbook, vnode_t *vp, offset_t *off)
+ {
+ 	dsl_pool_t *dp;
+@@ -3475,9 +3537,9 @@ dmu_send(const char *tosnap, const char *fromsnap, boolean_t embedok,
+ 		if (err == 0) {
+ 			/* dmu_send_impl will call dsl_pool_rele for us. */
+ 			err = dmu_send_impl(FTAG, dp, tosnap, ds, fromds, &zb,
+-			    is_clone, embedok, large_block_ok, outfd, resumeobj,
+-			    resumeoff, redactsnaparr, numredactsnaps,
+-			    redactbook, vp, off);
++			    is_clone, embedok, large_block_ok, compressok,
++			    outfd, resumeobj, resumeoff, redactsnaparr,
++			    numredactsnaps, redactbook, vp, off);
+ 		} else {
+ 			dsl_pool_rele(dp, FTAG);
+ 		}
+@@ -3486,8 +3548,9 @@ dmu_send(const char *tosnap, const char *fromsnap, boolean_t embedok,
+ 			dsl_dataset_rele(fromds, FTAG);
+ 	} else {
+ 		err = dmu_send_impl(FTAG, dp, tosnap, ds, NULL, NULL, B_FALSE,
+-		    embedok, large_block_ok, outfd, resumeobj, resumeoff,
+-		    redactsnaparr, numredactsnaps, redactbook, vp, off);
++		    embedok, large_block_ok, compressok, outfd, resumeobj,
++		    resumeoff, redactsnaparr, numredactsnaps, redactbook, vp,
++		    off);
+ 	}
+ out:
+ 	if (numredactsnaps > 0) {
+@@ -3505,33 +3568,45 @@ out:
+ }
+ 
+ static int
+-dmu_adjust_send_estimate_for_indirects(dsl_dataset_t *ds, uint64_t size,
+-    uint64_t *sizep)
++dmu_adjust_send_estimate_for_indirects(dsl_dataset_t *ds, uint64_t uncompressed,
++    uint64_t compressed, boolean_t stream_compressed, uint64_t *sizep)
+ {
+ 	int err;
++	uint64_t size;
+ 	/*
+ 	 * Assume that space (both on-disk and in-stream) is dominated by
+ 	 * data.  We will adjust for indirect blocks and the copies property,
+ 	 * but ignore per-object space used (eg, dnodes and DRR_OBJECT records).
+ 	 */
++	uint64_t recordsize;
++	uint64_t record_count;
++
++	/* Assume all (uncompressed) blocks are recordsize. */
++	err = dsl_prop_get_int_ds(ds, zfs_prop_to_name(ZFS_PROP_RECORDSIZE),
++	    &recordsize);
++	if (err != 0)
++		return (err);
++	record_count = uncompressed / recordsize;
++
++	/*
++	 * If we're estimating a send size for a compressed stream, use the
++	 * compressed data size to estimate the stream size. Otherwise, use the
++	 * uncompressed data size.
++	 */
++	size = stream_compressed ? compressed : uncompressed;
+ 
+ 	/*
+ 	 * Subtract out approximate space used by indirect blocks.
+ 	 * Assume most space is used by data blocks (non-indirect, non-dnode).
+-	 * Assume all blocks are recordsize.  Assume ditto blocks and
+-	 * internal fragmentation counter out compression.
++	 * Assume no ditto blocks or internal fragmentation.
+ 	 *
+ 	 * Therefore, space used by indirect blocks is sizeof(blkptr_t) per
+-	 * block, which we observe in practice.
++	 * block.
+ 	 */
+-	uint64_t recordsize;
+-	err = dsl_prop_get_int_ds(ds, "recordsize", &recordsize);
+-	if (err != 0)
+-		return (err);
+-	size -= size / recordsize * sizeof (blkptr_t);
++	size -= record_count * sizeof (blkptr_t);
+ 
+ 	/* Add in the space for the record associated with each block. */
+-	size += size / recordsize * sizeof (dmu_replay_record_t);
++	size += record_count * sizeof (dmu_replay_record_t);
+ 
+ 	*sizep = size;
+ 
+@@ -3539,11 +3614,12 @@ dmu_adjust_send_estimate_for_indirects(dsl_dataset_t *ds, uint64_t size,
+ }
+ 
+ int
+-dmu_send_estimate(dsl_dataset_t *ds, dsl_dataset_t *fromds, uint64_t *sizep)
++dmu_send_estimate(dsl_dataset_t *ds, dsl_dataset_t *fromds,
++    boolean_t stream_compressed, uint64_t *sizep)
+ {
+ 	dsl_pool_t *dp = ds->ds_dir->dd_pool;
+ 	int err;
+-	uint64_t size;
++	uint64_t uncomp, comp;
+ 
+ 	ASSERT(dsl_pool_config_held(dp));
+ 
+@@ -3558,49 +3634,57 @@ dmu_send_estimate(dsl_dataset_t *ds, dsl_dataset_t *fromds, uint64_t *sizep)
+ 	if (fromds != NULL && !dsl_dataset_is_before(ds, fromds, 0))
+ 		return (SET_ERROR(EXDEV));
+ 
+-	/* Get uncompressed size estimate of changed data. */
++	/* Get compressed and uncompressed size estimates of changed data. */
+ 	if (fromds == NULL) {
+-		size = dsl_dataset_phys(ds)->ds_uncompressed_bytes;
++		uncomp = dsl_dataset_phys(ds)->ds_uncompressed_bytes;
++		comp = dsl_dataset_phys(ds)->ds_compressed_bytes;
+ 	} else {
+-		uint64_t used, comp;
++		uint64_t used;
+ 		err = dsl_dataset_space_written(fromds, ds,
+-		    &used, &comp, &size);
++		    &used, &comp, &uncomp);
+ 		if (err != 0)
+ 			return (err);
+ 	}
+ 
+-	err = dmu_adjust_send_estimate_for_indirects(ds, size, sizep);
++	err = dmu_adjust_send_estimate_for_indirects(ds, uncomp, comp,
++	    stream_compressed, sizep);
+ 	return (err);
+ }
+ 
++struct calculate_send_arg {
++	uint64_t uncompressed;
++	uint64_t compressed;
++};
++
+ /*
+  * Simple callback used to traverse the blocks of a snapshot and sum their
+- * uncompressed size
++ * uncompressed and compressed sizes.
+  */
+ /* ARGSUSED */
+ static int
+ dmu_calculate_send_traversal(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
+     const zbookmark_phys_t *zb, const dnode_phys_t *dnp, void *arg)
+ {
+-	uint64_t *spaceptr = arg;
++	struct calculate_send_arg *space = arg;
+ 	if (bp != NULL && !BP_IS_HOLE(bp)) {
+-		*spaceptr += BP_GET_UCSIZE(bp);
++		space->uncompressed += BP_GET_UCSIZE(bp);
++		space->compressed += BP_GET_PSIZE(bp);
+ 	}
+ 	return (0);
+ }
+ 
+ /*
+  * Given a desination snapshot and a TXG, calculate the approximate size of a
+- * send stream sent from that TXG.  from_txg may be zero, indicating that the
++ * send stream sent from that TXG. from_txg may be zero, indicating that the
+  * whole snapshot will be sent.
+  */
+ int
+ dmu_send_estimate_from_txg(dsl_dataset_t *ds, uint64_t from_txg,
+-    uint64_t *sizep)
++    boolean_t stream_compressed, uint64_t *sizep)
+ {
+ 	dsl_pool_t *dp = ds->ds_dir->dd_pool;
+ 	int err;
+-	uint64_t size = 0;
++	struct calculate_send_arg size = { 0 };
+ 
+ 	ASSERT(dsl_pool_config_held(dp));
+ 
+@@ -3622,7 +3706,8 @@ dmu_send_estimate_from_txg(dsl_dataset_t *ds, uint64_t from_txg,
+ 	if (err)
+ 		return (err);
+ 
+-	err = dmu_adjust_send_estimate_for_indirects(ds, size, sizep);
++	err = dmu_adjust_send_estimate_for_indirects(ds, size.uncompressed,
++	    size.compressed, stream_compressed, sizep);
+ 	return (err);
+ }
+ 
+@@ -3935,14 +4020,14 @@ dmu_recv_begin_check(void *arg, dmu_tx_t *tx)
+ 
+ 	/*
+ 	 * The receiving code doesn't know how to translate a WRITE_EMBEDDED
+-	 * record to a plan WRITE record, so the pool must have the
++	 * record to a plain WRITE record, so the pool must have the
+ 	 * EMBEDDED_DATA feature enabled if the stream has WRITE_EMBEDDED
+ 	 * records.  Same with WRITE_EMBEDDED records that use LZ4 compression.
+ 	 */
+ 	if ((featureflags & DMU_BACKUP_FEATURE_EMBED_DATA) &&
+ 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_EMBEDDED_DATA))
+ 		return (SET_ERROR(ENOTSUP));
+-	if ((featureflags & DMU_BACKUP_FEATURE_EMBED_DATA_LZ4) &&
++	if ((featureflags & DMU_BACKUP_FEATURE_LZ4) &&
+ 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
+ 		return (SET_ERROR(ENOTSUP));
+ 
+@@ -4141,10 +4226,20 @@ dmu_recv_begin_sync(void *arg, dmu_tx_t *tx)
+ 		VERIFY0(zap_add(mos, dsobj, DS_FIELD_RESUME_BYTES,
+ 		    8, 1, &zero, tx));
+ 		if (DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo) &
++		    DMU_BACKUP_FEATURE_LARGE_BLOCKS) {
++			VERIFY0(zap_add(mos, dsobj, DS_FIELD_RESUME_LARGEBLOCK,
++			    8, 1, &one, tx));
++		}
++		if (DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo) &
+ 		    DMU_BACKUP_FEATURE_EMBED_DATA) {
+ 			VERIFY0(zap_add(mos, dsobj, DS_FIELD_RESUME_EMBEDOK,
+ 			    8, 1, &one, tx));
+ 		}
++		if (DMU_GET_FEATUREFLAGS(drrb->drr_versioninfo) &
++		    DMU_BACKUP_FEATURE_COMPRESSED) {
++			VERIFY0(zap_add(mos, dsobj, DS_FIELD_RESUME_COMPRESSOK,
++			    8, 1, &one, tx));
++		}
+ 
+ 		uint64_t *redact_snaps;
+ 		uint_t numredactsnaps;
+@@ -4229,7 +4324,7 @@ dmu_recv_resume_begin_check(void *arg, dmu_tx_t *tx)
+ 	if ((featureflags & DMU_BACKUP_FEATURE_EMBED_DATA) &&
+ 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_EMBEDDED_DATA))
+ 		return (SET_ERROR(ENOTSUP));
+-	if ((featureflags & DMU_BACKUP_FEATURE_EMBED_DATA_LZ4) &&
++	if ((featureflags & DMU_BACKUP_FEATURE_LZ4) &&
+ 	    !spa_feature_is_enabled(dp->dp_spa, SPA_FEATURE_LZ4_COMPRESS))
+ 		return (SET_ERROR(ENOTSUP));
+ 
+@@ -4539,10 +4634,11 @@ byteswap_record(dmu_replay_record_t *drr)
+ 		DO64(drr_write.drr_object);
+ 		DO32(drr_write.drr_type);
+ 		DO64(drr_write.drr_offset);
+-		DO64(drr_write.drr_length);
++		DO64(drr_write.drr_logical_size);
+ 		DO64(drr_write.drr_toguid);
+ 		ZIO_CHECKSUM_BSWAP(&drr->drr_u.drr_write.drr_key.ddk_cksum);
+ 		DO64(drr_write.drr_key.ddk_prop);
++		DO64(drr_write.drr_compressed_size);
+ 		break;
+ 	case DRR_WRITE_BYREF:
+ 		DO64(drr_write_byref.drr_object);
+@@ -4772,7 +4868,7 @@ receive_write(struct receive_writer_arg *rwa, struct drr_write *drrw,
+ 	dmu_tx_t *tx;
+ 	int err;
+ 
+-	if (drrw->drr_offset + drrw->drr_length < drrw->drr_offset ||
++	if (drrw->drr_offset + drrw->drr_logical_size < drrw->drr_offset ||
+ 	    !DMU_OT_IS_VALID(drrw->drr_type))
+ 		return (SET_ERROR(EINVAL));
+ 
+@@ -4794,7 +4890,7 @@ receive_write(struct receive_writer_arg *rwa, struct drr_write *drrw,
+ 	tx = dmu_tx_create(rwa->os);
+ 
+ 	dmu_tx_hold_write(tx, drrw->drr_object,
+-	    drrw->drr_offset, drrw->drr_length);
++	    drrw->drr_offset, drrw->drr_logical_size);
+ 	err = dmu_tx_assign(tx, TXG_WAIT);
+ 	if (err != 0) {
+ 		dmu_tx_abort(tx);
+@@ -4804,9 +4900,10 @@ receive_write(struct receive_writer_arg *rwa, struct drr_write *drrw,
+ 		dmu_object_byteswap_t byteswap =
+ 		    DMU_OT_BYTESWAP(drrw->drr_type);
+ 		dmu_ot_byteswap[byteswap].ob_func(abuf->b_data,
+-		    drrw->drr_length);
++		    DRR_WRITE_PAYLOAD_SIZE(drrw));
+ 	}
+ 
++	/* use the bonus buf to look up the dnode in dmu_assign_arcbuf */
+ 	dmu_buf_t *bonus;
+ 	if (dmu_bonus_hold(rwa->os, drrw->drr_object, FTAG, &bonus) != 0)
+ 		return (SET_ERROR(EINVAL));
+@@ -5224,18 +5321,31 @@ receive_read_record(dmu_recv_cookie_t *drc)
+ 	case DRR_WRITE:
+ 	{
+ 		struct drr_write *drrw = &drc->drc_rrd->header.drr_u.drr_write;
+-		arc_buf_t *abuf = arc_loan_buf(dmu_objset_spa(drc->drc_os),
+-		    drrw->drr_length);
++		arc_buf_t *abuf;
++		boolean_t is_meta = DMU_OT_IS_METADATA(drrw->drr_type);
++		if (DRR_WRITE_COMPRESSED(drrw)) {
++			ASSERT3U(drrw->drr_compressed_size, >, 0);
++			ASSERT3U(drrw->drr_logical_size, >=,
++			    drrw->drr_compressed_size);
++			ASSERT(!is_meta);
++			abuf = arc_loan_compressed_buf(
++			    dmu_objset_spa(drc->drc_os),
++			    drrw->drr_compressed_size, drrw->drr_logical_size,
++			    drrw->drr_compressiontype);
++		} else {
++			abuf = arc_loan_buf(dmu_objset_spa(drc->drc_os),
++			    is_meta, drrw->drr_logical_size);
++		}
+ 
+ 		err = receive_read_payload_and_next_header(drc,
+-		    drrw->drr_length, abuf->b_data);
++		    DRR_WRITE_PAYLOAD_SIZE(drrw), abuf->b_data);
+ 		if (err != 0) {
+ 			dmu_return_arcbuf(abuf);
+ 			return (err);
+ 		}
+ 		drc->drc_rrd->write_buf = abuf;
+ 		receive_read_prefetch(drc, drrw->drr_object, drrw->drr_offset,
+-		    drrw->drr_length);
++		    drrw->drr_logical_size);
+ 		return (err);
+ 	}
+ 	case DRR_WRITE_BYREF:
+diff --git a/usr/src/uts/common/fs/zfs/dsl_dataset.c b/usr/src/uts/common/fs/zfs/dsl_dataset.c
+index 6ec9bcd..7db148e 100644
+--- a/usr/src/uts/common/fs/zfs/dsl_dataset.c
++++ b/usr/src/uts/common/fs/zfs/dsl_dataset.c
+@@ -1946,9 +1946,17 @@ get_receive_resume_stats(dsl_dataset_t *ds, nvlist_t *nv)
+ 			fnvlist_add_string(token_nv, "toname", buf);
+ 		}
+ 		if (zap_contains(dp->dp_meta_objset, ds->ds_object,
++		    DS_FIELD_RESUME_LARGEBLOCK) == 0) {
++			fnvlist_add_boolean(token_nv, "largeblockok");
++		}
++		if (zap_contains(dp->dp_meta_objset, ds->ds_object,
+ 		    DS_FIELD_RESUME_EMBEDOK) == 0) {
+ 			fnvlist_add_boolean(token_nv, "embedok");
+ 		}
++		if (zap_contains(dp->dp_meta_objset, ds->ds_object,
++		    DS_FIELD_RESUME_COMPRESSOK) == 0) {
++			fnvlist_add_boolean(token_nv, "compressok");
++		}
+ 		if (dsl_dataset_feature_is_active(ds,
+ 		    SPA_FEATURE_REDACTED_DATASETS)) {
+ 			uint64_t num_redact_snaps;
+diff --git a/usr/src/uts/common/fs/zfs/sys/arc.h b/usr/src/uts/common/fs/zfs/sys/arc.h
+index 0c8cedc..42f277d 100644
+--- a/usr/src/uts/common/fs/zfs/sys/arc.h
++++ b/usr/src/uts/common/fs/zfs/sys/arc.h
+@@ -122,11 +122,17 @@ typedef enum arc_flags
+ 
+ } arc_flags_t;
+ 
++typedef enum arc_buf_flags {
++	ARC_BUF_FLAG_SHARED		= 1 << 0,
++	ARC_BUF_FLAG_COMPRESSED		= 1 << 1
++} arc_buf_flags_t;
++
+ struct arc_buf {
+ 	arc_buf_hdr_t		*b_hdr;
+ 	arc_buf_t		*b_next;
+ 	kmutex_t		b_evict_lock;
+ 	void			*b_data;
++	arc_buf_flags_t		b_prop_flags;
+ };
+ 
+ typedef enum arc_buf_contents {
+@@ -150,13 +156,21 @@ typedef enum arc_space_type {
+ 
+ void arc_space_consume(uint64_t space, arc_space_type_t type);
+ void arc_space_return(uint64_t space, arc_space_type_t type);
+-arc_buf_t *arc_alloc_buf(spa_t *spa, int32_t size, void *tag,
+-    arc_buf_contents_t type);
+-arc_buf_t *arc_loan_buf(spa_t *spa, int size);
++boolean_t arc_is_metadata(arc_buf_t *buf);
++enum zio_compress arc_get_compression(arc_buf_t *buf);
++int arc_decompress(arc_buf_t *buf);
++arc_buf_t *arc_alloc_buf(spa_t *spa, void *tag, arc_buf_contents_t type,
++    int32_t size);
++arc_buf_t *arc_alloc_compressed_buf(spa_t *spa, void *tag,
++    uint64_t psize, uint64_t lsize, enum zio_compress compression_type);
++arc_buf_t *arc_loan_buf(spa_t *spa, boolean_t is_metadata, int size);
++arc_buf_t *arc_loan_compressed_buf(spa_t *spa, uint64_t psize, uint64_t lsize,
++    enum zio_compress compression_type);
+ void arc_return_buf(arc_buf_t *buf, void *tag);
+ void arc_loan_inuse_buf(arc_buf_t *buf, void *tag);
+ void arc_buf_destroy(arc_buf_t *buf, void *tag);
+ int arc_buf_size(arc_buf_t *buf);
++int arc_buf_lsize(arc_buf_t *buf);
+ void arc_release(arc_buf_t *buf, void *tag);
+ int arc_released(arc_buf_t *buf);
+ void arc_buf_freeze(arc_buf_t *buf);
+diff --git a/usr/src/uts/common/fs/zfs/sys/dmu.h b/usr/src/uts/common/fs/zfs/sys/dmu.h
+index 77ca477..0aa2d4e 100644
+--- a/usr/src/uts/common/fs/zfs/sys/dmu.h
++++ b/usr/src/uts/common/fs/zfs/sys/dmu.h
+@@ -47,6 +47,7 @@
+ #include <sys/inttypes.h>
+ #include <sys/cred.h>
+ #include <sys/fs/zfs.h>
++#include <sys/zio_compress.h>
+ #include <sys/zio_priority.h>
+ 
+ #ifdef	__cplusplus
+@@ -425,7 +426,7 @@ dmu_write_embedded(objset_t *os, uint64_t object, uint64_t offset,
+ #define	WP_SPILL	0x4
+ 
+ void dmu_write_policy(objset_t *os, struct dnode *dn, int level, int wp,
+-    struct zio_prop *zp);
++    enum zio_compress compress_override, struct zio_prop *zp);
+ /*
+  * The bonus data is accessed more or less like a regular buffer.
+  * You must dmu_bonus_hold() to get the buffer, which will give you a
+diff --git a/usr/src/uts/common/fs/zfs/sys/dmu_send.h b/usr/src/uts/common/fs/zfs/sys/dmu_send.h
+index 6179031..8e77533 100644
+--- a/usr/src/uts/common/fs/zfs/sys/dmu_send.h
++++ b/usr/src/uts/common/fs/zfs/sys/dmu_send.h
+@@ -41,15 +41,16 @@ struct dmu_replay_record;
+ extern const char *recv_clone_name;
+ 
+ int dmu_send(const char *tosnap, const char *fromsnap, boolean_t embedok,
+-    boolean_t large_block_ok, int outfd, uint64_t resumeobj, uint64_t resumeoff,
+-    nvlist_t *redactsnaps, const char *redactbook, struct vnode *vp,
+-    offset_t *off);
++    boolean_t large_block_ok, boolean_t compressok, int outfd,
++    uint64_t resumeobj, uint64_t resumeoff,
++    nvlist_t *redactsnaps, const char *redactbook,
++    struct vnode *vp, offset_t *off);
+ int dmu_send_estimate(struct dsl_dataset *ds, struct dsl_dataset *fromds,
+-    uint64_t *sizep);
++    boolean_t stream_compressed, uint64_t *sizep);
+ int dmu_send_estimate_from_txg(struct dsl_dataset *ds, uint64_t fromtxg,
+-    uint64_t *sizep);
++    boolean_t stream_compressed, uint64_t *sizep);
+ int dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
+-    boolean_t embedok, boolean_t large_block_ok,
++    boolean_t embedok, boolean_t large_block_ok, boolean_t compressok,
+     int outfd, struct vnode *vp, offset_t *off);
+ 
+ typedef struct dmu_recv_cookie {
+diff --git a/usr/src/uts/common/fs/zfs/sys/dsl_dataset.h b/usr/src/uts/common/fs/zfs/sys/dsl_dataset.h
+index c8a77d3..e03d344 100644
+--- a/usr/src/uts/common/fs/zfs/sys/dsl_dataset.h
++++ b/usr/src/uts/common/fs/zfs/sys/dsl_dataset.h
+@@ -103,7 +103,9 @@ struct dsl_pool;
+ #define	DS_FIELD_RESUME_OBJECT "com.delphix:resume_object"
+ #define	DS_FIELD_RESUME_OFFSET "com.delphix:resume_offset"
+ #define	DS_FIELD_RESUME_BYTES "com.delphix:resume_bytes"
++#define	DS_FIELD_RESUME_LARGEBLOCK "com.delphix:resume_largeblockok"
+ #define	DS_FIELD_RESUME_EMBEDOK "com.delphix:resume_embedok"
++#define	DS_FIELD_RESUME_COMPRESSOK "com.delphix:resume_compressok"
+ /*
+  * We were receiving an incremental from a redaction bookmark, and these are the
+  * guids of its snapshots.
+diff --git a/usr/src/uts/common/fs/zfs/sys/refcount.h b/usr/src/uts/common/fs/zfs/sys/refcount.h
+index 345d42a..3f50cdd 100644
+--- a/usr/src/uts/common/fs/zfs/sys/refcount.h
++++ b/usr/src/uts/common/fs/zfs/sys/refcount.h
+@@ -103,7 +103,7 @@ typedef struct refcount {
+ 	atomic_add_64(&(src)->rc_count, -__tmp); \
+ 	atomic_add_64(&(dst)->rc_count, __tmp); \
+ }
+-#define	refcount_transfer_ownership(rc, current_holder, new_holder)
++#define	refcount_transfer_ownership(rc, current_holder, new_holder)	(void)0
+ #define	refcount_held(rc, holder)		((rc)->rc_count > 0)
+ #define	refcount_not_held(rc, holder)		(B_TRUE)
+ 
+diff --git a/usr/src/uts/common/fs/zfs/sys/zfs_ioctl.h b/usr/src/uts/common/fs/zfs/sys/zfs_ioctl.h
+index bf91508..ec2ba83 100644
+--- a/usr/src/uts/common/fs/zfs/sys/zfs_ioctl.h
++++ b/usr/src/uts/common/fs/zfs/sys/zfs_ioctl.h
+@@ -84,21 +84,22 @@ typedef enum drr_headertype {
+ #define	DMU_BACKUP_FEATURE_SA_SPILL		(1 << 2)
+ /* flags #3 - #15 are reserved for incompatible closed-source implementations */
+ #define	DMU_BACKUP_FEATURE_EMBED_DATA		(1 << 16)
+-#define	DMU_BACKUP_FEATURE_EMBED_DATA_LZ4	(1 << 17)
++#define	DMU_BACKUP_FEATURE_LZ4			(1 << 17)
+ #define	DMU_BACKUP_FEATURE_EMBED_MOOCH_BYTESWAP	(1 << 18)
+ #define	DMU_BACKUP_FEATURE_LARGE_BLOCKS		(1 << 19)
+ #define	DMU_BACKUP_FEATURE_RESUMING		(1 << 20)
+ #define	DMU_BACKUP_FEATURE_REDACTED		(1 << 21)
++#define	DMU_BACKUP_FEATURE_COMPRESSED		(1 << 22)
+ 
+ /*
+  * Mask of all supported backup features
+  */
+ #define	DMU_BACKUP_FEATURE_MASK	(DMU_BACKUP_FEATURE_DEDUP | \
+     DMU_BACKUP_FEATURE_DEDUPPROPS | DMU_BACKUP_FEATURE_SA_SPILL | \
+-    DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_EMBED_DATA_LZ4 | \
+-    DMU_BACKUP_FEATURE_EMBED_MOOCH_BYTESWAP | \
+-    DMU_BACKUP_FEATURE_RESUMING | \
+-    DMU_BACKUP_FEATURE_LARGE_BLOCKS | DMU_BACKUP_FEATURE_REDACTED)
++    DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_LZ4 | \
++    DMU_BACKUP_FEATURE_EMBED_MOOCH_BYTESWAP | DMU_BACKUP_FEATURE_RESUMING | \
++    DMU_BACKUP_FEATURE_LARGE_BLOCKS | DMU_BACKUP_FEATURE_REDACTED | \
++    DMU_BACKUP_FEATURE_COMPRESSED)
+ 
+ /* Are all features in the given flag word currently supported? */
+ #define	DMU_STREAM_SUPPORTED(x)	(!((x) & ~DMU_BACKUP_FEATURE_MASK))
+@@ -147,6 +148,12 @@ typedef enum dmu_send_resume_token_version {
+ 
+ #define	DRR_IS_DEDUP_CAPABLE(flags)	((flags) & DRR_CHECKSUM_DEDUP)
+ 
++/* deal with compressed drr_write replay records */
++#define	DRR_WRITE_COMPRESSED(drrw)	((drrw)->drr_compressiontype != 0)
++#define	DRR_WRITE_PAYLOAD_SIZE(drrw) \
++	(DRR_WRITE_COMPRESSED(drrw) ? (drrw)->drr_compressed_size : \
++	(drrw)->drr_logical_size)
++
+ /*
+  * zfs ioctl command structure
+  */
+@@ -194,12 +201,16 @@ typedef struct dmu_replay_record {
+ 			dmu_object_type_t drr_type;
+ 			uint32_t drr_pad;
+ 			uint64_t drr_offset;
+-			uint64_t drr_length;
++			uint64_t drr_logical_size;
+ 			uint64_t drr_toguid;
+ 			uint8_t drr_checksumtype;
+ 			uint8_t drr_checksumflags;
+-			uint8_t drr_pad2[6];
+-			ddt_key_t drr_key; /* deduplication key */
++			uint8_t drr_compressiontype;
++			uint8_t drr_pad2[5];
++			/* deduplication key */
++			ddt_key_t drr_key;
++			/* only nonzero if drr_compressiontype is not 0 */
++			uint64_t drr_compressed_size;
+ 			/* content follows */
+ 		} drr_write;
+ 		struct drr_free {
+diff --git a/usr/src/uts/common/fs/zfs/sys/zio.h b/usr/src/uts/common/fs/zfs/sys/zio.h
+index fc622b0..7251118 100644
+--- a/usr/src/uts/common/fs/zfs/sys/zio.h
++++ b/usr/src/uts/common/fs/zfs/sys/zio.h
+@@ -103,26 +103,6 @@ enum zio_checksum {
+ #define	ZIO_DEDUPCHECKSUM	ZIO_CHECKSUM_SHA256
+ #define	ZIO_DEDUPDITTO_MIN	100
+ 
+-enum zio_compress {
+-	ZIO_COMPRESS_INHERIT = 0,
+-	ZIO_COMPRESS_ON,
+-	ZIO_COMPRESS_OFF,
+-	ZIO_COMPRESS_LZJB,
+-	ZIO_COMPRESS_EMPTY,
+-	ZIO_COMPRESS_GZIP_1,
+-	ZIO_COMPRESS_GZIP_2,
+-	ZIO_COMPRESS_GZIP_3,
+-	ZIO_COMPRESS_GZIP_4,
+-	ZIO_COMPRESS_GZIP_5,
+-	ZIO_COMPRESS_GZIP_6,
+-	ZIO_COMPRESS_GZIP_7,
+-	ZIO_COMPRESS_GZIP_8,
+-	ZIO_COMPRESS_GZIP_9,
+-	ZIO_COMPRESS_ZLE,
+-	ZIO_COMPRESS_LZ4,
+-	ZIO_COMPRESS_FUNCTIONS
+-};
+-
+ /*
+  * The number of "legacy" compression functions which can be set on individual
+  * objects.
+@@ -414,6 +394,8 @@ struct zio {
+ 	void		*io_orig_data;
+ 	uint64_t	io_size;
+ 	uint64_t	io_orig_size;
++	/* io_lsize != io_orig_size iff this is a raw write */
++	uint64_t	io_lsize;
+ 
+ 	/* Stuff for the vdev stack */
+ 	vdev_t		*io_vd;
+@@ -469,14 +451,14 @@ extern zio_t *zio_root(spa_t *spa,
+     zio_done_func_t *done, void *private, enum zio_flag flags);
+ 
+ extern zio_t *zio_read(zio_t *pio, spa_t *spa, const blkptr_t *bp, void *data,
+-    uint64_t size, zio_done_func_t *done, void *private,
++    uint64_t lsize, zio_done_func_t *done, void *private,
+     zio_priority_t priority, enum zio_flag flags, const zbookmark_phys_t *zb);
+ 
+ extern zio_t *zio_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp,
+-    void *data, uint64_t size, const zio_prop_t *zp,
++    void *data, uint64_t size, uint64_t psize, const zio_prop_t *zp,
+     zio_done_func_t *ready, zio_done_func_t *physdone, zio_done_func_t *done,
+-    void *private,
+-    zio_priority_t priority, enum zio_flag flags, const zbookmark_phys_t *zb);
++    void *private, zio_priority_t priority, enum zio_flag flags,
++    const zbookmark_phys_t *zb);
+ 
+ extern zio_t *zio_rewrite(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp,
+     void *data, uint64_t size, zio_done_func_t *done, void *private,
+diff --git a/usr/src/uts/common/fs/zfs/sys/zio_compress.h b/usr/src/uts/common/fs/zfs/sys/zio_compress.h
+index f4cb845..0c1783b 100644
+--- a/usr/src/uts/common/fs/zfs/sys/zio_compress.h
++++ b/usr/src/uts/common/fs/zfs/sys/zio_compress.h
+@@ -25,17 +25,36 @@
+  */
+ /*
+  * Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
++ * Copyright (c) 2015 by Delphix. All rights reserved.
+  */
+ 
+ #ifndef _SYS_ZIO_COMPRESS_H
+ #define	_SYS_ZIO_COMPRESS_H
+ 
+-#include <sys/zio.h>
+-
+ #ifdef	__cplusplus
+ extern "C" {
+ #endif
+ 
++enum zio_compress {
++	ZIO_COMPRESS_INHERIT = 0,
++	ZIO_COMPRESS_ON,
++	ZIO_COMPRESS_OFF,
++	ZIO_COMPRESS_LZJB,
++	ZIO_COMPRESS_EMPTY,
++	ZIO_COMPRESS_GZIP_1,
++	ZIO_COMPRESS_GZIP_2,
++	ZIO_COMPRESS_GZIP_3,
++	ZIO_COMPRESS_GZIP_4,
++	ZIO_COMPRESS_GZIP_5,
++	ZIO_COMPRESS_GZIP_6,
++	ZIO_COMPRESS_GZIP_7,
++	ZIO_COMPRESS_GZIP_8,
++	ZIO_COMPRESS_GZIP_9,
++	ZIO_COMPRESS_ZLE,
++	ZIO_COMPRESS_LZ4,
++	ZIO_COMPRESS_FUNCTIONS
++};
++
+ /* Common signature for all zio compress functions. */
+ typedef size_t zio_compress_func_t(void *src, void *dst,
+     size_t s_len, size_t d_len, int);
+diff --git a/usr/src/uts/common/fs/zfs/zfs_ioctl.c b/usr/src/uts/common/fs/zfs/zfs_ioctl.c
+index 3334ca4..94bacf6 100644
+--- a/usr/src/uts/common/fs/zfs/zfs_ioctl.c
++++ b/usr/src/uts/common/fs/zfs/zfs_ioctl.c
+@@ -4353,6 +4353,7 @@ zfs_ioc_send(zfs_cmd_t *zc)
+ 	boolean_t estimate = (zc->zc_guid != 0);
+ 	boolean_t embedok = (zc->zc_flags & 0x1);
+ 	boolean_t large_block_ok = (zc->zc_flags & 0x2);
++	boolean_t compressok = (zc->zc_flags & 0x4);
+ 
+ 	if (zc->zc_obj != 0) {
+ 		dsl_pool_t *dp;
+@@ -4400,7 +4401,7 @@ zfs_ioc_send(zfs_cmd_t *zc)
+ 			}
+ 		}
+ 
+-		error = dmu_send_estimate(tosnap, fromsnap,
++		error = dmu_send_estimate(tosnap, fromsnap, compressok,
+ 		    &zc->zc_objset_type);
+ 
+ 		if (fromsnap != NULL)
+@@ -4414,7 +4415,7 @@ zfs_ioc_send(zfs_cmd_t *zc)
+ 
+ 		off = fp->f_offset;
+ 		error = dmu_send_obj(zc->zc_name, zc->zc_sendobj,
+-		    zc->zc_fromobj, embedok, large_block_ok,
++		    zc->zc_fromobj, embedok, large_block_ok, compressok,
+ 		    zc->zc_cookie, fp->f_vnode, &off);
+ 
+ 		if (VOP_SEEK(fp->f_vnode, fp->f_offset, &off, NULL) == 0)
+@@ -5321,6 +5322,8 @@ zfs_ioc_space_snaps(const char *lastsnap, nvlist_t *innvl, nvlist_t *outnvl)
+  *         indicates that blocks > 128KB are permitted
+  *     (optional) "embedok" -> (value ignored)
+  *         presence indicates DRR_WRITE_EMBEDDED records are permitted
++ *     (optional) "compressok" -> (value ignored)
++ *         presence indicates compressed DRR_WRITE records are permitted
+  *     (optional) "resume_object" and "resume_offset" -> (uint64)
+  *         if present, resume send stream from specified object and offset.
+  *     (optional) "redactbook" -> (string)
+@@ -5341,6 +5344,7 @@ zfs_ioc_send_new(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 	int fd;
+ 	boolean_t largeblockok;
+ 	boolean_t embedok;
++	boolean_t compressok;
+ 	uint64_t resumeobj = 0;
+ 	uint64_t resumeoff = 0;
+ 	nvlist_t *redactnvl = NULL;
+@@ -5354,6 +5358,7 @@ zfs_ioc_send_new(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 
+ 	largeblockok = nvlist_exists(innvl, "largeblockok");
+ 	embedok = nvlist_exists(innvl, "embedok");
++	compressok = nvlist_exists(innvl, "compressok");
+ 
+ 	(void) nvlist_lookup_uint64(innvl, "resume_object", &resumeobj);
+ 	(void) nvlist_lookup_uint64(innvl, "resume_offset", &resumeoff);
+@@ -5366,9 +5371,8 @@ zfs_ioc_send_new(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 		return (SET_ERROR(EBADF));
+ 
+ 	off = fp->f_offset;
+-	error = dmu_send(snapname, fromname, embedok, largeblockok, fd,
+-	    resumeobj, resumeoff, redactnvl,
+-	    redactbook, fp->f_vnode, &off);
++	error = dmu_send(snapname, fromname, embedok, largeblockok, compressok,
++	    fd, resumeobj, resumeoff, redactnvl, redactbook, fp->f_vnode, &off);
+ 
+ 	if (VOP_SEEK(fp->f_vnode, fp->f_offset, &off, NULL) == 0)
+ 		fp->f_offset = off;
+@@ -5383,6 +5387,12 @@ zfs_ioc_send_new(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+  * innvl: {
+  *     (optional) "from" -> full snap or bookmark name to send an incremental
+  *                          from
++ *     (optional) "largeblockok" -> (value ignored)
++ *         indicates that blocks > 128KB are permitted
++ *     (optional) "embedok" -> (value ignored)
++ *         presence indicates DRR_WRITE_EMBEDDED records are permitted
++ *     (optional) "compressok" -> (value ignored)
++ *         presence indicates compressed DRR_WRITE records are permitted
+  * }
+  *
+  * outnvl: {
+@@ -5396,6 +5406,11 @@ zfs_ioc_send_space(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 	dsl_dataset_t *tosnap;
+ 	int error;
+ 	char *fromname;
++	/* LINTED E_FUNC_SET_NOT_USED */
++	boolean_t largeblockok;
++	/* LINTED E_FUNC_SET_NOT_USED */
++	boolean_t embedok;
++	boolean_t compressok;
+ 	uint64_t space;
+ 
+ 	error = dsl_pool_hold(snapname, FTAG, &dp);
+@@ -5408,6 +5423,10 @@ zfs_ioc_send_space(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 		return (error);
+ 	}
+ 
++	largeblockok = nvlist_exists(innvl, "largeblockok");
++	embedok = nvlist_exists(innvl, "embedok");
++	compressok = nvlist_exists(innvl, "compressok");
++
+ 	error = nvlist_lookup_string(innvl, "from", &fromname);
+ 	if (error == 0) {
+ 		if (strchr(fromname, '@')) {
+@@ -5423,7 +5442,8 @@ zfs_ioc_send_space(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 				dsl_pool_rele(dp, FTAG);
+ 				return (error);
+ 			}
+-			error = dmu_send_estimate(tosnap, fromsnap, &space);
++			error = dmu_send_estimate(tosnap, fromsnap, compressok,
++			    &space);
+ 			dsl_dataset_rele(fromsnap, FTAG);
+ 		} else if (strchr(fromname, '#')) {
+ 			/*
+@@ -5441,7 +5461,7 @@ zfs_ioc_send_space(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 				return (error);
+ 			}
+ 			error = dmu_send_estimate_from_txg(tosnap,
+-			    frombm.zbm_creation_txg, &space);
++			    frombm.zbm_creation_txg, compressok, &space);
+ 		} else {
+ 			/*
+ 			 * from is not properly formatted as a snapshot or
+@@ -5451,7 +5471,7 @@ zfs_ioc_send_space(const char *snapname, nvlist_t *innvl, nvlist_t *outnvl)
+ 		}
+ 	} else {
+ 		// If estimating the size of a full send, use dmu_send_estimate
+-		error = dmu_send_estimate(tosnap, NULL, &space);
++		error = dmu_send_estimate(tosnap, NULL, compressok, &space);
+ 	}
+ 
+ 	fnvlist_add_uint64(outnvl, "space", space);
+diff --git a/usr/src/uts/common/fs/zfs/zio.c b/usr/src/uts/common/fs/zfs/zio.c
+index 982a190..2f34a9d 100644
+--- a/usr/src/uts/common/fs/zfs/zio.c
++++ b/usr/src/uts/common/fs/zfs/zio.c
+@@ -517,21 +517,23 @@ zio_timestamp_compare(const void *x1, const void *x2)
+  */
+ static zio_t *
+ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
+-    void *data, uint64_t size, zio_done_func_t *done, void *private,
+-    zio_type_t type, zio_priority_t priority, enum zio_flag flags,
+-    vdev_t *vd, uint64_t offset, const zbookmark_phys_t *zb,
+-    enum zio_stage stage, enum zio_stage pipeline)
++    void *data, uint64_t lsize, uint64_t psize, zio_done_func_t *done,
++    void *private, zio_type_t type, zio_priority_t priority,
++    enum zio_flag flags, vdev_t *vd, uint64_t offset,
++    const zbookmark_phys_t *zb, enum zio_stage stage, enum zio_stage pipeline)
+ {
+ 	zio_t *zio;
+ 
+-	ASSERT3U(size, <=, SPA_MAXBLOCKSIZE);
+-	ASSERT(P2PHASE(size, SPA_MINBLOCKSIZE) == 0);
++	ASSERT3U(psize, <=, SPA_MAXBLOCKSIZE);
++	ASSERT(P2PHASE(psize, SPA_MINBLOCKSIZE) == 0);
+ 	ASSERT(P2PHASE(offset, SPA_MINBLOCKSIZE) == 0);
+ 
+ 	ASSERT(!vd || spa_config_held(spa, SCL_STATE_ALL, RW_READER));
+ 	ASSERT(!bp || !(flags & ZIO_FLAG_CONFIG_WRITER));
+ 	ASSERT(vd || stage == ZIO_STAGE_OPEN);
+ 
++	IMPLY(lsize != psize, (flags & ZIO_FLAG_RAW) != 0);
++
+ 	zio = kmem_cache_alloc(zio_cache, KM_SLEEP);
+ 	bzero(zio, sizeof (zio_t));
+ 
+@@ -575,7 +577,8 @@ zio_create(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
+ 	zio->io_vd = vd;
+ 	zio->io_offset = offset;
+ 	zio->io_orig_data = zio->io_data = data;
+-	zio->io_orig_size = zio->io_size = size;
++	zio->io_orig_size = zio->io_size = psize;
++	zio->io_lsize = lsize;
+ 	zio->io_orig_flags = zio->io_flags = flags;
+ 	zio->io_orig_stage = zio->io_stage = stage;
+ 	zio->io_orig_pipeline = zio->io_pipeline = pipeline;
+@@ -615,7 +618,7 @@ zio_null(zio_t *pio, spa_t *spa, vdev_t *vd, zio_done_func_t *done,
+ {
+ 	zio_t *zio;
+ 
+-	zio = zio_create(pio, spa, 0, NULL, NULL, 0, done, private,
++	zio = zio_create(pio, spa, 0, NULL, NULL, 0, 0, done, private,
+ 	    ZIO_TYPE_NULL, ZIO_PRIORITY_NOW, flags, vd, 0, NULL,
+ 	    ZIO_STAGE_OPEN, ZIO_INTERLOCK_PIPELINE);
+ 
+@@ -718,7 +721,7 @@ zio_read(zio_t *pio, spa_t *spa, const blkptr_t *bp,
+ 	zfs_blkptr_verify(spa, bp);
+ 
+ 	zio = zio_create(pio, spa, BP_PHYSICAL_BIRTH(bp), bp,
+-	    data, size, done, private,
++	    data, size, size, done, private,
+ 	    ZIO_TYPE_READ, priority, flags, NULL, 0, zb,
+ 	    ZIO_STAGE_OPEN, (flags & ZIO_FLAG_DDT_CHILD) ?
+ 	    ZIO_DDT_CHILD_READ_PIPELINE : ZIO_READ_PIPELINE);
+@@ -728,10 +731,10 @@ zio_read(zio_t *pio, spa_t *spa, const blkptr_t *bp,
+ 
+ zio_t *
+ zio_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp,
+-    void *data, uint64_t size, const zio_prop_t *zp,
++    void *data, uint64_t lsize, uint64_t psize, const zio_prop_t *zp,
+     zio_done_func_t *ready, zio_done_func_t *physdone, zio_done_func_t *done,
+-    void *private,
+-    zio_priority_t priority, enum zio_flag flags, const zbookmark_phys_t *zb)
++    void *private, zio_priority_t priority, enum zio_flag flags,
++    const zbookmark_phys_t *zb)
+ {
+ 	zio_t *zio;
+ 
+@@ -744,7 +747,7 @@ zio_write(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp,
+ 	    zp->zp_copies > 0 &&
+ 	    zp->zp_copies <= spa_max_replication(spa));
+ 
+-	zio = zio_create(pio, spa, txg, bp, data, size, done, private,
++	zio = zio_create(pio, spa, txg, bp, data, lsize, psize, done, private,
+ 	    ZIO_TYPE_WRITE, priority, flags, NULL, 0, zb,
+ 	    ZIO_STAGE_OPEN, (flags & ZIO_FLAG_DDT_CHILD) ?
+ 	    ZIO_DDT_CHILD_WRITE_PIPELINE : ZIO_WRITE_PIPELINE);
+@@ -773,7 +776,7 @@ zio_rewrite(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, void *data,
+ {
+ 	zio_t *zio;
+ 
+-	zio = zio_create(pio, spa, txg, bp, data, size, done, private,
++	zio = zio_create(pio, spa, txg, bp, data, size, size, done, private,
+ 	    ZIO_TYPE_WRITE, priority, flags | ZIO_FLAG_IO_REWRITE, NULL, 0, zb,
+ 	    ZIO_STAGE_OPEN, ZIO_REWRITE_PIPELINE);
+ 
+@@ -855,8 +858,8 @@ zio_free_sync(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
+ 		stage |= ZIO_STAGE_ISSUE_ASYNC;
+ 
+ 	zio = zio_create(pio, spa, txg, bp, NULL, BP_GET_PSIZE(bp),
+-	    NULL, NULL, ZIO_TYPE_FREE, ZIO_PRIORITY_NOW, flags,
+-	    NULL, 0, NULL, ZIO_STAGE_OPEN, stage);
++	    BP_GET_PSIZE(bp), NULL, NULL, ZIO_TYPE_FREE, ZIO_PRIORITY_NOW,
++	    flags, NULL, 0, NULL, ZIO_STAGE_OPEN, stage);
+ 
+ 	return (zio);
+ }
+@@ -889,8 +892,8 @@ zio_claim(zio_t *pio, spa_t *spa, uint64_t txg, const blkptr_t *bp,
+ 	ASSERT(!BP_GET_DEDUP(bp) || !spa_writeable(spa));	/* zdb(1M) */
+ 
+ 	zio = zio_create(pio, spa, txg, bp, NULL, BP_GET_PSIZE(bp),
+-	    done, private, ZIO_TYPE_CLAIM, ZIO_PRIORITY_NOW, flags,
+-	    NULL, 0, NULL, ZIO_STAGE_OPEN, ZIO_CLAIM_PIPELINE);
++	    BP_GET_PSIZE(bp), done, private, ZIO_TYPE_CLAIM, ZIO_PRIORITY_NOW,
++	    flags, NULL, 0, NULL, ZIO_STAGE_OPEN, ZIO_CLAIM_PIPELINE);
+ 	ASSERT0(zio->io_queued_timestamp);
+ 
+ 	return (zio);
+@@ -904,7 +907,7 @@ zio_ioctl(zio_t *pio, spa_t *spa, vdev_t *vd, int cmd,
+ 	int c;
+ 
+ 	if (vd->vdev_children == 0) {
+-		zio = zio_create(pio, spa, 0, NULL, NULL, 0, done, private,
++		zio = zio_create(pio, spa, 0, NULL, NULL, 0, 0, done, private,
+ 		    ZIO_TYPE_IOCTL, ZIO_PRIORITY_NOW, flags, vd, 0, NULL,
+ 		    ZIO_STAGE_OPEN, ZIO_IOCTL_PIPELINE);
+ 
+@@ -932,9 +935,9 @@ zio_read_phys(zio_t *pio, vdev_t *vd, uint64_t offset, uint64_t size,
+ 	    offset >= vd->vdev_psize - VDEV_LABEL_END_SIZE);
+ 	ASSERT3U(offset + size, <=, vd->vdev_psize);
+ 
+-	zio = zio_create(pio, vd->vdev_spa, 0, NULL, data, size, done, private,
+-	    ZIO_TYPE_READ, priority, flags | ZIO_FLAG_PHYSICAL, vd, offset,
+-	    NULL, ZIO_STAGE_OPEN, ZIO_READ_PHYS_PIPELINE);
++	zio = zio_create(pio, vd->vdev_spa, 0, NULL, data, size, size, done,
++	    private, ZIO_TYPE_READ, priority, flags | ZIO_FLAG_PHYSICAL, vd,
++	    offset, NULL, ZIO_STAGE_OPEN, ZIO_READ_PHYS_PIPELINE);
+ 
+ 	zio->io_prop.zp_checksum = checksum;
+ 
+@@ -953,9 +956,9 @@ zio_write_phys(zio_t *pio, vdev_t *vd, uint64_t offset, uint64_t size,
+ 	    offset >= vd->vdev_psize - VDEV_LABEL_END_SIZE);
+ 	ASSERT3U(offset + size, <=, vd->vdev_psize);
+ 
+-	zio = zio_create(pio, vd->vdev_spa, 0, NULL, data, size, done, private,
+-	    ZIO_TYPE_WRITE, priority, flags | ZIO_FLAG_PHYSICAL, vd, offset,
+-	    NULL, ZIO_STAGE_OPEN, ZIO_WRITE_PHYS_PIPELINE);
++	zio = zio_create(pio, vd->vdev_spa, 0, NULL, data, size, size, done,
++	    private, ZIO_TYPE_WRITE, priority, flags | ZIO_FLAG_PHYSICAL, vd,
++	    offset, NULL, ZIO_STAGE_OPEN, ZIO_WRITE_PHYS_PIPELINE);
+ 
+ 	zio->io_prop.zp_checksum = checksum;
+ 
+@@ -1055,7 +1058,7 @@ zio_vdev_child_io(zio_t *pio, blkptr_t *bp, vdev_t *vd, uint64_t offset,
+ 		flags &= ~ZIO_FLAG_IO_ALLOCATING;
+ 	}
+ 
+-	zio = zio_create(pio, pio->io_spa, pio->io_txg, bp, data, size,
++	zio = zio_create(pio, pio->io_spa, pio->io_txg, bp, data, size, size,
+ 	    done, private, type, priority, flags, vd, offset, &pio->io_bookmark,
+ 	    ZIO_STAGE_VDEV_IO_START >> 1, pipeline);
+ 	ASSERT3U(zio->io_child_type, ==, ZIO_CHILD_VDEV);
+@@ -1077,7 +1080,7 @@ zio_vdev_delegated_io(vdev_t *vd, uint64_t offset, void *data, uint64_t size,
+ 	ASSERT(vd->vdev_ops->vdev_op_leaf);
+ 
+ 	zio = zio_create(NULL, vd->vdev_spa, 0, NULL,
+-	    data, size, done, private, type, priority,
++	    data, size, size, done, private, type, priority,
+ 	    flags | ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_RETRY | ZIO_FLAG_DELEGATED,
+ 	    vd, offset, NULL,
+ 	    ZIO_STAGE_VDEV_IO_START >> 1, ZIO_VDEV_CHILD_PIPELINE);
+@@ -1106,8 +1109,11 @@ zio_shrink(zio_t *zio, uint64_t size)
+ 	 * Note, BP_IS_RAIDZ() assumes no compression.
+ 	 */
+ 	ASSERT(BP_GET_COMPRESS(zio->io_bp) == ZIO_COMPRESS_OFF);
+-	if (!BP_IS_RAIDZ(zio->io_bp))
+-		zio->io_orig_size = zio->io_size = size;
++	if (!BP_IS_RAIDZ(zio->io_bp)) {
++		/* we are not doing a raw write */
++		ASSERT3U(zio->io_size, ==, zio->io_lsize);
++		zio->io_orig_size = zio->io_size = zio->io_lsize = size;
++	}
+ }
+ 
+ /*
+@@ -1210,10 +1216,12 @@ zio_write_compress(zio_t *zio)
+ 	zio_prop_t *zp = &zio->io_prop;
+ 	enum zio_compress compress = zp->zp_compress;
+ 	blkptr_t *bp = zio->io_bp;
+-	uint64_t lsize = zio->io_size;
+-	uint64_t psize = lsize;
++	uint64_t lsize = zio->io_lsize;
++	uint64_t psize = zio->io_size;
+ 	int pass = 1;
+ 
++	EQUIV(lsize != psize, (zio->io_flags & ZIO_FLAG_RAW) != 0);
++
+ 	/*
+ 	 * If our children haven't all reached the ready stage,
+ 	 * wait for them and then repeat this pipeline stage.
+@@ -1252,7 +1260,8 @@ zio_write_compress(zio_t *zio)
+ 		    spa_max_replication(spa)) == BP_GET_NDVAS(bp));
+ 	}
+ 
+-	if (compress != ZIO_COMPRESS_OFF) {
++	/* If it's a compressed write that is not raw, compress the buffer. */
++	if (compress != ZIO_COMPRESS_OFF && psize == lsize) {
+ 		void *cbuf = zio_buf_alloc(lsize);
+ 		psize = zio_compress_data(compress, zio->io_data, cbuf, lsize);
+ 		if (psize == 0 || psize == lsize) {
+@@ -1295,6 +1304,8 @@ zio_write_compress(zio_t *zio)
+ 				    psize, lsize, NULL);
+ 			}
+ 		}
++	} else {
++		ASSERT3U(psize, !=, 0);
+ 	}
+ 
+ 	/*
+@@ -2156,10 +2167,10 @@ zio_write_gang_block(zio_t *pio)
+ 		zp.zp_nopwrite = B_FALSE;
+ 
+ 		zio_t *cio = zio_write(zio, spa, txg, &gbh->zg_blkptr[g],
+-		    (char *)pio->io_data + (pio->io_size - resid), lsize, &zp,
+-		    zio_write_gang_member_ready, NULL, NULL, &gn->gn_child[g],
+-		    pio->io_priority, ZIO_GANG_CHILD_FLAGS(pio),
+-		    &pio->io_bookmark);
++		    (char *)pio->io_data + (pio->io_size - resid), lsize, lsize,
++		    &zp, zio_write_gang_member_ready, NULL, NULL,
++		    &gn->gn_child[g], pio->io_priority,
++		    ZIO_GANG_CHILD_FLAGS(pio), &pio->io_bookmark);
+ 
+ 		if (pio->io_flags & ZIO_FLAG_IO_ALLOCATING) {
+ 			ASSERT(pio->io_priority == ZIO_PRIORITY_ASYNC_WRITE);
+@@ -2363,6 +2374,8 @@ zio_ddt_collision(zio_t *zio, ddt_t *ddt, ddt_entry_t *dde)
+ {
+ 	spa_t *spa = zio->io_spa;
+ 
++	ASSERT0(zio->io_flags & ZIO_FLAG_RAW);
++
+ 	/*
+ 	 * Note: we compare the original data, not the transformed data,
+ 	 * because when zio->io_bp is an override bp, we will not have
+@@ -2510,6 +2523,7 @@ zio_ddt_write(zio_t *zio)
+ 	ASSERT(BP_GET_DEDUP(bp));
+ 	ASSERT(BP_GET_CHECKSUM(bp) == zp->zp_checksum);
+ 	ASSERT(BP_IS_HOLE(bp) || zio->io_bp_override);
++	ASSERT0(zio->io_flags & ZIO_FLAG_RAW);
+ 
+ 	ddt_enter(ddt);
+ 	dde = ddt_lookup(ddt, bp, B_TRUE);
+@@ -2563,7 +2577,7 @@ zio_ddt_write(zio_t *zio)
+ 		}
+ 
+ 		dio = zio_write(zio, spa, txg, bp, zio->io_orig_data,
+-		    zio->io_orig_size, &czp, NULL, NULL,
++		    zio->io_orig_size, zio->io_orig_size, &czp, NULL, NULL,
+ 		    zio_ddt_ditto_write_done, dde, zio->io_priority,
+ 		    ZIO_DDT_CHILD_FLAGS(zio), &zio->io_bookmark);
+ 
+@@ -2585,9 +2599,10 @@ zio_ddt_write(zio_t *zio)
+ 		ddt_phys_addref(ddp);
+ 	} else {
+ 		cio = zio_write(zio, spa, txg, bp, zio->io_orig_data,
+-		    zio->io_orig_size, zp, zio_ddt_child_write_ready, NULL,
+-		    zio_ddt_child_write_done, dde, zio->io_priority,
+-		    ZIO_DDT_CHILD_FLAGS(zio), &zio->io_bookmark);
++		    zio->io_orig_size, zio->io_orig_size, zp,
++		    zio_ddt_child_write_ready, NULL, zio_ddt_child_write_done,
++		    dde, zio->io_priority, ZIO_DDT_CHILD_FLAGS(zio),
++		    &zio->io_bookmark);
+ 
+ 		zio_push_transform(cio, zio->io_data, zio->io_size, 0, NULL);
+ 		dde->dde_lead_zio[p] = cio;
+-- 
+1.8.3.1
+

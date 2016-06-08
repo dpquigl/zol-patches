@@ -1,0 +1,275 @@
+From 34c0fdb5af94bdcb53ff2eb3db8ebd992522c0f7 Mon Sep 17 00:00:00 2001
+From: Dan Kimmel <dan.kimmel@delphix.com>
+Date: Thu, 19 May 2016 10:51:43 -0700
+Subject: [PATCH 2/6] DLPX-44715 remove #ifdef __lint hack from dmu.h
+
+---
+ usr/src/cmd/truss/Makefile.com                     |  6 ++++++
+ usr/src/cmd/zhack/Makefile.com                     |  3 +++
+ usr/src/cmd/zinject/Makefile.com                   |  3 +++
+ usr/src/lib/brand/solaris10/s10_brand/Makefile.com |  5 ++++-
+ usr/src/lib/libzfs/Makefile.com                    |  5 ++++-
+ usr/src/uts/common/fs/zfs/sys/dmu.h                | 10 ++--------
+ usr/src/uts/common/fs/zfs/sys/spa.h                |  3 +--
+ usr/src/uts/intel/dev/Makefile                     |  5 +++++
+ usr/src/uts/intel/stmf_sbd/Makefile                |  4 +++-
+ usr/src/uts/sparc/dev/Makefile                     |  5 +++++
+ usr/src/uts/sparc/stmf_sbd/Makefile                |  4 +++-
+ 11 files changed, 39 insertions(+), 14 deletions(-)
+
+diff --git a/usr/src/cmd/truss/Makefile.com b/usr/src/cmd/truss/Makefile.com
+index b500283..0ed1490 100644
+--- a/usr/src/cmd/truss/Makefile.com
++++ b/usr/src/cmd/truss/Makefile.com
+@@ -20,6 +20,7 @@
+ #
+ #
+ # Copyright 2012 Nexenta Systems, Inc.  All rights reserved.
++# Copyright (c) 2016 by Delphix. All rights reserved.
+ # Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
+ # Use is subject to license terms.
+ #
+@@ -47,6 +48,11 @@ LDLIBS	+= -lproc -lrtld_db -lc_db -lnsl -lsocket -ltsol -lnvpair
+ CPPFLAGS += -D_REENTRANT -D_LARGEFILE64_SOURCE=1
+ CPPFLAGS += -I$(SRC)/uts/common/fs/zfs
+ 
++LINTFLAGS += -erroff=E_STATIC_UNUSED
++LINTFLAGS += -erroff=E_NAME_USED_NOT_DEF2
++LINTFLAGS64 += -erroff=E_STATIC_UNUSED
++LINTFLAGS64 += -erroff=E_NAME_USED_NOT_DEF2
++
+ .KEEP_STATE:
+ 
+ %.o:	../%.c
+diff --git a/usr/src/cmd/zhack/Makefile.com b/usr/src/cmd/zhack/Makefile.com
+index 6792708..7d258bf 100644
+--- a/usr/src/cmd/zhack/Makefile.com
++++ b/usr/src/cmd/zhack/Makefile.com
+@@ -48,6 +48,9 @@ CFLAGS += $(CCVERBOSE)
+ CFLAGS64 += $(CCVERBOSE)
+ CPPFLAGS += -D_LARGEFILE64_SOURCE=1 -D_REENTRANT -DDEBUG $(INCS)
+ 
++LINTFLAGS += -erroff=E_STATIC_UNUSED
++LINTFLAGS64 += -erroff=E_STATIC_UNUSED
++
+ .KEEP_STATE:
+ 
+ all: $(PROG)
+diff --git a/usr/src/cmd/zinject/Makefile.com b/usr/src/cmd/zinject/Makefile.com
+index 76d2979..ceb38b4 100644
+--- a/usr/src/cmd/zinject/Makefile.com
++++ b/usr/src/cmd/zinject/Makefile.com
+@@ -42,6 +42,9 @@ CPPFLAGS += -D_LARGEFILE64_SOURCE=1 -D_REENTRANT $(INCS)
+ CERRWARN += -_gcc=-Wno-uninitialized
+ CERRWARN += -_gcc=-Wno-switch
+ 
++LINTFLAGS += -erroff=E_STATIC_UNUSED
++LINTFLAGS64 += -erroff=E_STATIC_UNUSED
++
+ .KEEP_STATE:
+ 
+ all: $(PROG)
+diff --git a/usr/src/lib/brand/solaris10/s10_brand/Makefile.com b/usr/src/lib/brand/solaris10/s10_brand/Makefile.com
+index 022b31b..9b72195 100644
+--- a/usr/src/lib/brand/solaris10/s10_brand/Makefile.com
++++ b/usr/src/lib/brand/solaris10/s10_brand/Makefile.com
+@@ -20,6 +20,7 @@
+ #
+ #
+ # Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2016 by Delphix. All rights reserved.
+ #
+ 
+ LIBRARY =	s10_brand.a
+@@ -52,7 +53,7 @@ SRCS =		$(CSRCS)
+ # normally stable, there are examples, such as with the solaris8 brand, where
+ # we could not combine the brand's libc with the native linker.  Since we want
+ # to run in a known configuration, we use the S10 libc/linker combination.
+-# 
++#
+ # There is one more non-obvious side effect of using the s10 linker that
+ # should be mentioned.  Since the linker is used to setup processes before
+ # libc is loaded, it makes system calls directly (ie avoiding libc), and
+@@ -82,6 +83,8 @@ C99LMODE=	-Xc99=%all
+ DYNFLAGS +=	$(DYNFLAGS_$(CLASS))
+ DYNFLAGS +=	$(BLOCAL) $(ZNOVERSION) -Wl,-e_start
+ LDLIBS +=	-lc -lmapmalloc
++LINTFLAGS +=	-erroff=E_STATIC_UNUSED
++LINTFLAGS64 +=	-erroff=E_STATIC_UNUSED
+ 
+ CERRWARN +=	-_gcc=-Wno-uninitialized
+ 
+diff --git a/usr/src/lib/libzfs/Makefile.com b/usr/src/lib/libzfs/Makefile.com
+index e07700a..d20c0f9 100644
+--- a/usr/src/lib/libzfs/Makefile.com
++++ b/usr/src/lib/libzfs/Makefile.com
+@@ -20,7 +20,7 @@
+ #
+ #
+ # Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+-# Copyright (c) 2011, 2015 by Delphix. All rights reserved.
++# Copyright (c) 2011, 2016 by Delphix. All rights reserved.
+ #
+ 
+ LIBRARY= libzfs.a
+@@ -79,6 +79,9 @@ CERRWARN +=	-_gcc=-Wno-switch
+ CERRWARN +=	-_gcc=-Wno-parentheses
+ CERRWARN +=	-_gcc=-Wno-unused-function
+ 
++LINTFLAGS +=	-erroff=E_STATIC_UNUSED
++LINTFLAGS64 +=	-erroff=E_STATIC_UNUSED
++
+ SRCS=	$(OBJS_COMMON:%.o=$(SRCDIR)/%.c)	\
+ 	$(OBJS_SHARED:%.o=$(SRC)/common/zfs/%.c)
+ $(LINTLIB) := SRCS=	$(SRCDIR)/$(LINTSRC)
+diff --git a/usr/src/uts/common/fs/zfs/sys/dmu.h b/usr/src/uts/common/fs/zfs/sys/dmu.h
+index 3a9e95c..e990bbc 100644
+--- a/usr/src/uts/common/fs/zfs/sys/dmu.h
++++ b/usr/src/uts/common/fs/zfs/sys/dmu.h
+@@ -21,7 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
++ * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
+  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
+  * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  * Copyright 2013 DEY Storage Systems, Inc.
+@@ -565,12 +565,7 @@ typedef struct dmu_buf_user {
+  * NOTE: This function should only be called once on a given dmu_buf_user_t.
+  *       To allow enforcement of this, dbu must already be zeroed on entry.
+  */
+-#ifdef __lint
+-/* Very ugly, but it beats issuing suppression directives in many Makefiles. */
+-extern void
+-dmu_buf_init_user(dmu_buf_user_t *dbu, dmu_buf_evict_func_t *evict_func,
+-    dmu_buf_t **clear_on_evict_dbufp);
+-#else /* __lint */
++/*ARGSUSED*/
+ inline void
+ dmu_buf_init_user(dmu_buf_user_t *dbu, dmu_buf_evict_func_t *evict_func,
+     dmu_buf_t **clear_on_evict_dbufp)
+@@ -582,7 +577,6 @@ dmu_buf_init_user(dmu_buf_user_t *dbu, dmu_buf_evict_func_t *evict_func,
+ 	dbu->dbu_clear_on_evict_dbufp = clear_on_evict_dbufp;
+ #endif
+ }
+-#endif /* __lint */
+ 
+ /*
+  * Attach user data to a dbuf and mark it for normal (when the dbuf's
+diff --git a/usr/src/uts/common/fs/zfs/sys/spa.h b/usr/src/uts/common/fs/zfs/sys/spa.h
+index f5852ae..7d21930 100644
+--- a/usr/src/uts/common/fs/zfs/sys/spa.h
++++ b/usr/src/uts/common/fs/zfs/sys/spa.h
+@@ -35,6 +35,7 @@
+ #include <sys/sysmacros.h>
+ #include <sys/types.h>
+ #include <sys/fs/zfs.h>
++#include <sys/dmu.h>
+ 
+ #ifdef	__cplusplus
+ extern "C" {
+@@ -621,8 +622,6 @@ _NOTE(CONSTCOND) } while (0)
+ 	ASSERT(len < size);						\
+ }
+ 
+-#include <sys/dmu.h>
+-
+ #define	BP_GET_BUFC_TYPE(bp)						\
+ 	(((BP_GET_LEVEL(bp) > 0) || (DMU_OT_IS_METADATA(BP_GET_TYPE(bp)))) ? \
+ 	ARC_BUFC_METADATA : ARC_BUFC_DATA)
+diff --git a/usr/src/uts/intel/dev/Makefile b/usr/src/uts/intel/dev/Makefile
+index b5c7c1a..c34feb9 100644
+--- a/usr/src/uts/intel/dev/Makefile
++++ b/usr/src/uts/intel/dev/Makefile
+@@ -23,6 +23,8 @@
+ # Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ # Use is subject to license terms.
+ #
++# Copyright (c) 2016 by Delphix. All rights reserved.
++#
+ #	This makefile drives the production of the dev file system
+ #	kernel module.
+ #
+@@ -63,6 +65,9 @@ LDFLAGS		+= -dy -Nfs/devfs -Nmisc/dls
+ INC_PATH	+= -I$(UTSBASE)/common/fs/zfs
+ INC_PATH	+= -I$(UTSBASE)/common/io/bpf
+ 
++LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
++LINTTAGS	+= -erroff=E_STATIC_UNUSED
++
+ CERRWARN	+= -_gcc=-Wno-parentheses
+ CERRWARN	+= -_gcc=-Wno-unused-label
+ CERRWARN	+= -_gcc=-Wno-uninitialized
+diff --git a/usr/src/uts/intel/stmf_sbd/Makefile b/usr/src/uts/intel/stmf_sbd/Makefile
+index a57ccaf..ac64b10 100644
+--- a/usr/src/uts/intel/stmf_sbd/Makefile
++++ b/usr/src/uts/intel/stmf_sbd/Makefile
+@@ -20,8 +20,9 @@
+ #
+ #
+ # Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2016 by Delphix. All rights reserved.
+ #
+-#	This makefile drives the production of the stmf_sbd driver for 
++#	This makefile drives the production of the stmf_sbd driver for
+ #	COMSTAR.
+ 
+ #
+@@ -68,6 +69,7 @@ C99LMODE=	-Xc99=%all
+ # to investigate and remove these for maximum lint coverage.
+ #
+ LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
++LINTTAGS	+= -erroff=E_STATIC_UNUSED
+ 
+ CERRWARN	+= -_gcc=-Wno-switch
+ CERRWARN	+= -_gcc=-Wno-parentheses
+diff --git a/usr/src/uts/sparc/dev/Makefile b/usr/src/uts/sparc/dev/Makefile
+index 1469b37..e079a82 100644
+--- a/usr/src/uts/sparc/dev/Makefile
++++ b/usr/src/uts/sparc/dev/Makefile
+@@ -21,6 +21,8 @@
+ # Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ # Use is subject to license terms.
+ #
++# Copyright (c) 2016 by Delphix. All rights reserved.
++#
+ # uts/sparc/dev/Makefile
+ #	This makefile drives the production of the /dev file system
+ #	kernel module.
+@@ -64,6 +66,9 @@ LDFLAGS		+= -dy -Nfs/devfs -Nmisc/dls
+ INC_PATH	+= -I$(UTSBASE)/common/fs/zfs
+ INC_PATH	+= -I$(UTSBASE)/common/io/bpf
+ 
++LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
++LINTTAGS	+= -erroff=E_STATIC_UNUSED
++
+ CERRWARN	+= -_gcc=-Wno-parentheses
+ CERRWARN	+= -_gcc=-Wno-unused-label
+ CERRWARN	+= -_gcc=-Wno-uninitialized
+diff --git a/usr/src/uts/sparc/stmf_sbd/Makefile b/usr/src/uts/sparc/stmf_sbd/Makefile
+index 9480a44..0d6b9ad 100644
+--- a/usr/src/uts/sparc/stmf_sbd/Makefile
++++ b/usr/src/uts/sparc/stmf_sbd/Makefile
+@@ -20,8 +20,9 @@
+ #
+ #
+ # Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2016 by Delphix. All rights reserved.
+ #
+-#	This makefile drives the production of the stmf_sbd driver for 
++#	This makefile drives the production of the stmf_sbd driver for
+ #	COMSTAR.
+ 
+ #
+@@ -69,6 +70,7 @@ C99LMODE=	-Xc99=%all
+ # to investigate and remove these for maximum lint coverage.
+ #
+ LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
++LINTTAGS	+= -erroff=E_STATIC_UNUSED
+ 
+ CERRWARN	+= -_gcc=-Wno-switch
+ CERRWARN	+= -_gcc=-Wno-parentheses
+-- 
+1.8.3.1
+

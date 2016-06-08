@@ -1,0 +1,26 @@
+From 156686c9b00cf44c7ce46066058c6e5b3342f8b6 Mon Sep 17 00:00:00 2001
+From: Dan Kimmel <dan.kimmel@delphix.com>
+Date: Tue, 24 May 2016 01:54:46 -0700
+Subject: [PATCH 4/6] DLPX-44733 combine arc_buf_alloc_impl() with
+ arc_buf_clone() (fix assertion)
+
+---
+ usr/src/uts/common/fs/zfs/arc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/usr/src/uts/common/fs/zfs/arc.c b/usr/src/uts/common/fs/zfs/arc.c
+index ffa9953..d526757 100644
+--- a/usr/src/uts/common/fs/zfs/arc.c
++++ b/usr/src/uts/common/fs/zfs/arc.c
+@@ -2447,7 +2447,7 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, void *tag, boolean_t compressed,
+ 	 * hdr. To ensure we notice it if this behavior changes, we assert this
+ 	 * here the best we can.
+ 	 */
+-	IMPLY(compressed, !HDR_SHARED_DATA(hdr));
++	IMPLY(ARC_BUF_COMPRESSED(buf), !HDR_SHARED_DATA(hdr));
+ 
+ 	/*
+ 	 * If the hdr's data can be shared then we share the data buffer and
+-- 
+1.8.3.1
+

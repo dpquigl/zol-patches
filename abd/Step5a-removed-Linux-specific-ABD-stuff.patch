@@ -1,0 +1,771 @@
+From 4acfbb9725c4d2e04c6c0e7df89c46c53d1acb99 Mon Sep 17 00:00:00 2001
+From: Dan Kimmel <dan.kimmel@delphix.com>
+Date: Mon, 14 Dec 2015 09:43:30 -0800
+Subject: [PATCH] removed Linux-specific ABD stuff
+
+---
+ usr/src/common/zfs/zfs_fletcher.c        |  16 +--
+ usr/src/common/zfs/zfs_fletcher.h        |   8 +-
+ usr/src/uts/common/fs/zfs/abd.c          | 229 ++++---------------------------
+ usr/src/uts/common/fs/zfs/edonr_zfs.c    |   4 +-
+ usr/src/uts/common/fs/zfs/sha256.c       |   6 +-
+ usr/src/uts/common/fs/zfs/skein_zfs.c    |   4 +-
+ usr/src/uts/common/fs/zfs/sys/abd.h      |  23 +---
+ usr/src/uts/common/fs/zfs/vdev_raidz.c   |  14 +-
+ usr/src/uts/common/fs/zfs/zio_checksum.c |   8 +-
+ 9 files changed, 62 insertions(+), 250 deletions(-)
+
+diff --git a/usr/src/common/zfs/zfs_fletcher.c b/usr/src/common/zfs/zfs_fletcher.c
+index 72f7820..2677810 100644
+--- a/usr/src/common/zfs/zfs_fletcher.c
++++ b/usr/src/common/zfs/zfs_fletcher.c
+@@ -143,7 +143,7 @@ fletcher_init(zio_cksum_t *zcp)
+ }
+ 
+ int
+-fletcher_2_incremental_native(const void *buf, uint64_t size, void *data)
++fletcher_2_incremental_native(void *buf, uint64_t size, void *data)
+ {
+ 	zio_cksum_t *zcp = data;
+ 
+@@ -173,11 +173,11 @@ fletcher_2_native(const void *buf, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) fletcher_2_incremental_native(buf, size, zcp);
++	(void) fletcher_2_incremental_native((void *) buf, size, zcp);
+ }
+ 
+ int
+-fletcher_2_incremental_byteswap(const void *buf, uint64_t size, void *data)
++fletcher_2_incremental_byteswap(void *buf, uint64_t size, void *data)
+ {
+ 	zio_cksum_t *zcp = data;
+ 
+@@ -207,11 +207,11 @@ fletcher_2_byteswap(const void *buf, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) fletcher_2_incremental_byteswap(buf, size, zcp);
++	(void) fletcher_2_incremental_byteswap((void *) buf, size, zcp);
+ }
+ 
+ int
+-fletcher_4_incremental_native(const void *buf, uint64_t size, void *data)
++fletcher_4_incremental_native(void *buf, uint64_t size, void *data)
+ {
+ 	zio_cksum_t *zcp = data;
+ 
+@@ -241,11 +241,11 @@ fletcher_4_native(const void *buf, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) fletcher_4_incremental_native(buf, size, zcp);
++	(void) fletcher_4_incremental_native((void *) buf, size, zcp);
+ }
+ 
+ int
+-fletcher_4_incremental_byteswap(const void *buf, uint64_t size, void *data)
++fletcher_4_incremental_byteswap(void *buf, uint64_t size, void *data)
+ {
+ 	zio_cksum_t *zcp = data;
+ 
+@@ -275,5 +275,5 @@ fletcher_4_byteswap(const void *buf, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) fletcher_4_incremental_byteswap(buf, size, zcp);
++	(void) fletcher_4_incremental_byteswap((void *) buf, size, zcp);
+ }
+diff --git a/usr/src/common/zfs/zfs_fletcher.h b/usr/src/common/zfs/zfs_fletcher.h
+index e680957..4d818fe 100644
+--- a/usr/src/common/zfs/zfs_fletcher.h
++++ b/usr/src/common/zfs/zfs_fletcher.h
+@@ -44,12 +44,12 @@ extern "C" {
+ void fletcher_init(zio_cksum_t *);
+ void fletcher_2_native(const void *, uint64_t, const void *, zio_cksum_t *);
+ void fletcher_2_byteswap(const void *, uint64_t, const void *, zio_cksum_t *);
+-int fletcher_2_incremental_native(const void *, uint64_t, void *);
+-int fletcher_2_incremental_byteswap(const void *, uint64_t, void *);
++int fletcher_2_incremental_native(void *, uint64_t, void *);
++int fletcher_2_incremental_byteswap(void *, uint64_t, void *);
+ void fletcher_4_native(const void *, uint64_t, const void *, zio_cksum_t *);
+ void fletcher_4_byteswap(const void *, uint64_t, const void *, zio_cksum_t *);
+-int fletcher_4_incremental_native(const void *, uint64_t, void *);
+-int fletcher_4_incremental_byteswap(const void *, uint64_t, void *);
++int fletcher_4_incremental_native(void *, uint64_t, void *);
++int fletcher_4_incremental_byteswap(void *, uint64_t, void *);
+ 
+ #ifdef	__cplusplus
+ }
+diff --git a/usr/src/uts/common/fs/zfs/abd.c b/usr/src/uts/common/fs/zfs/abd.c
+index 4129276..08f6adc 100644
+--- a/usr/src/uts/common/fs/zfs/abd.c
++++ b/usr/src/uts/common/fs/zfs/abd.c
+@@ -42,11 +42,6 @@ struct page;
+ 	kmem_free(page, PAGESIZE)
+ #define	kmap(page)			((void *)page)
+ #define	kunmap(page)			((void)0)
+-#define	zfs_kmap_atomic(page, type)	((void *)page)
+-#define	zfs_kunmap_atomic(addr, type)	((void)0)
+-#define	pagefault_disable()		((void)0)
+-#define	pagefault_enable()		((void)0)
+-#define	flush_kernel_dcache_page(page)	((void)0)
+ #define	set_current_state(state)	((void)0)
+ 
+ 
+@@ -408,11 +403,6 @@ abd_return_buf_copy(abd_t *a, void *b, size_t n)
+ 	abd_return_buf(a, b, n);
+ }
+ 
+-typedef enum abd_iter_type {
+-	ABD_ITER_READ,
+-	ABD_ITER_WRITE
+-} abd_iter_type_t;
+-
+ struct abd_iter {
+ 	abd_t		*iter_abd;	/* ABD being iterated through */
+ 	size_t		iter_pos;	/* position in current ABD (0 would */
+@@ -420,10 +410,6 @@ struct abd_iter {
+ 					/* ABD) */
+ 	void		*iter_mapaddr;	/* mapped addr, adjusted by offset */
+ 	size_t		iter_mapsize;	/* size of mapped region */
+-	abd_iter_type_t	iter_rw;	/* r/w access, whether to flush cache */
+-#ifndef HAVE_1ARG_KMAP_ATOMIC
+-	int		iter_km_type;	/* KM_USER0 or KM_USER1 */
+-#endif
+ };
+ 
+ static inline size_t
+@@ -443,12 +429,9 @@ abd_iter_scatter_page_index(struct abd_iter *aiter)
+ 
+ /*
+  * Initialize the abd_iter.
+- * Pass ABD_ITER_WRITE to rw if you will write to the abd buffer.
+- * Please use abd_iter_init or abd_iter_init2 for one or two iterators
+- * respectively, they will setup KM_USERx accordingly.
+  */
+ static void
+-abd_iter_init_km(struct abd_iter *aiter, abd_t *abd, abd_iter_type_t rw, int km)
++abd_iter_init(struct abd_iter *aiter, abd_t *abd)
+ {
+ 	abd_verify(abd);
+ 	aiter->iter_abd = abd;
+@@ -456,24 +439,6 @@ abd_iter_init_km(struct abd_iter *aiter, abd_t *abd, abd_iter_type_t rw, int km)
+ 	aiter->iter_mapaddr = NULL;
+ 	aiter->iter_mapsize = ABD_IS_LINEAR(abd) ?
+ 	    abd->abd_size : abd_iter_scatter_page_offset(aiter);
+-	aiter->iter_rw = rw;
+-#ifndef HAVE_1ARG_KMAP_ATOMIC
+-	aiter->iter_km_type = km;
+-#endif
+-}
+-
+-static inline void
+-abd_iter_init(struct abd_iter *a, abd_t *abd, abd_iter_type_t rw)
+-{
+-	abd_iter_init_km(a, abd, rw, 0);
+-}
+-
+-static inline void
+-abd_iter_init2(struct abd_iter *a, abd_t *aabd, abd_iter_type_t arw,
+-    struct abd_iter *b, abd_t *babd, abd_iter_type_t brw)
+-{
+-	abd_iter_init_km(a, aabd, arw, 0);
+-	abd_iter_init_km(b, babd, brw, 1);
+ }
+ 
+ /*
+@@ -498,12 +463,11 @@ abd_iter_advance(struct abd_iter *aiter, size_t amount)
+ 
+ /*
+  * Map the current page in abd_iter.
+- * Pass B_TRUE to atomic if you want to use kmap_atomic.
+  * This can be safely called when the aiter has already exhausted, in which
+  * case this does nothing.
+  */
+ static void
+-abd_iter_map_x(struct abd_iter *aiter, boolean_t atomic)
++abd_iter_map(struct abd_iter *aiter)
+ {
+ 	void *paddr;
+ 	size_t offset = 0;
+@@ -517,40 +481,23 @@ abd_iter_map_x(struct abd_iter *aiter, boolean_t atomic)
+ 	if (ABD_IS_LINEAR(aiter->iter_abd)) {
+ 		paddr = aiter->iter_abd->abd_u.abd_linear.abd_buf;
+ 		offset = aiter->iter_pos;
+-
+-		/*
+-		 * Turn off pagefaults to keep the context the same as
+-		 * kmap_atomic.
+-		 */
+-		if (atomic) {
+-			pagefault_disable();
+-		}
+ 	} else {
+ 		size_t index = abd_iter_scatter_page_index(aiter);
+ 		offset = abd_iter_scatter_page_offset(aiter);
+-
+ 		ASSERT3U(aiter->iter_mapsize, ==, PAGESIZE - offset);
+-
+-		struct page *p =
+-		    aiter->iter_abd->abd_u.abd_scatter.abd_pages[index];
+-		if (atomic) {
+-			paddr = zfs_kmap_atomic(p,
+-			    aiter->iter_km_type ? KM_USER1 : KM_USER0);
+-		} else {
+-			paddr = kmap(p);
+-		}
++		paddr = kmap(
++		    aiter->iter_abd->abd_u.abd_scatter.abd_pages[index]);
+ 	}
+ 	aiter->iter_mapaddr = (char *)paddr + offset;
+ }
+ 
+ /*
+  * Unmap the current page in abd_iter.
+- * Pass B_TRUE to atomic if you want to use kunmap_atomic.
+  * This can be safely called when the aiter has already exhausted, in which
+  * case this does nothing.
+  */
+ static void
+-abd_iter_unmap_x(struct abd_iter *aiter, boolean_t atomic)
++abd_iter_unmap(struct abd_iter *aiter)
+ {
+ 	/* there's nothing left to unmap, so do nothing */
+ 	if (aiter->iter_abd->abd_size - aiter->iter_pos == 0)
+@@ -559,37 +506,17 @@ abd_iter_unmap_x(struct abd_iter *aiter, boolean_t atomic)
+ 	ASSERT3P(aiter->iter_mapaddr, !=, NULL);
+ 	ASSERT3U(aiter->iter_mapsize, >, 0);
+ 
+-	if (ABD_IS_LINEAR(aiter->iter_abd)) {
+-		pagefault_enable();
+-	} else {
++	if (ABD_IS_SCATTER(aiter->iter_abd)) {
+ 		size_t index = abd_iter_scatter_page_index(aiter);
+-		/* LINTED E_FUNC_SET_NOT_USED */
+-		struct page *p =
+-		    aiter->iter_abd->abd_u.abd_scatter.abd_pages[index];
+-		if (atomic) {
+-			if (aiter->iter_rw == ABD_ITER_WRITE) {
+-				flush_kernel_dcache_page(p);
+-			}
+-			// TODO where did paddr come from??? it's getting macro'ed out
+-			// TODO maybe this should be aiter->iter_mapaddr
+-			zfs_kunmap_atomic(paddr,
+-			    aiter->iter_km_type ? KM_USER1 : KM_USER0);
+-		} else {
+-			kunmap(p);
+-		}
++		kunmap(aiter->iter_abd->abd_u.abd_scatter.abd_pages[index]);
+ 	}
+ 	aiter->iter_mapaddr = NULL;
+ 	aiter->iter_mapsize = 0;
+ }
+ 
+-#define	abd_iter_map_atomic(a)		abd_iter_map_x(a, B_TRUE)
+-#define	abd_iter_map(a)			abd_iter_map_x(a, B_FALSE)
+-#define	abd_iter_unmap_atomic(a)	abd_iter_unmap_x(a, B_TRUE)
+-#define	abd_iter_unmap(a)		abd_iter_unmap_x(a, B_FALSE)
+-
+-static int
++int
+ abd_iterate_func(abd_t *abd, size_t size, size_t off,
+-    abd_iter_wfunc_t *func, void *private, abd_iter_type_t rw)
++    abd_iter_func_t *func, void *private)
+ {
+ 	int ret = 0;
+ 	struct abd_iter aiter;
+@@ -597,7 +524,7 @@ abd_iterate_func(abd_t *abd, size_t size, size_t off,
+ 	abd_verify(abd);
+ 	ASSERT3U(off + size, <=, abd->abd_size);
+ 
+-	abd_iter_init(&aiter, abd, rw);
++	abd_iter_init(&aiter, abd);
+ 	abd_iter_advance(&aiter, off);
+ 
+ 	while (size > 0) {
+@@ -609,11 +536,11 @@ abd_iterate_func(abd_t *abd, size_t size, size_t off,
+ 		 */
+ 		ASSERT(size == len || (len & 15) == 0);
+ 
+-		abd_iter_map_atomic(&aiter);
++		abd_iter_map(&aiter);
+ 
+ 		ret = func(aiter.iter_mapaddr, len, private);
+ 
+-		abd_iter_unmap_atomic(&aiter);
++		abd_iter_unmap(&aiter);
+ 
+ 		if (ret != 0)
+ 			break;
+@@ -625,39 +552,12 @@ abd_iterate_func(abd_t *abd, size_t size, size_t off,
+ 	return (ret);
+ }
+ 
+-/*
+- * Iterate over ABD and call a read function @func.
+- * @func should be implemented so that its behaviour is the same when taking
+- * linear and when taking scatter.
+- */
+-int
+-abd_iterate_rfunc(abd_t *abd, size_t size, size_t off,
+-    abd_iter_rfunc_t *func, void *private)
+-{
+-	/* skip type checking on func */
+-	return (abd_iterate_func(abd, size, off,
+-	    (abd_iter_wfunc_t *)func, private, ABD_ITER_READ));
+-}
+-
+-/*
+- * Iterate over ABD and call a write function @func.
+- * @func should be implemented so that its behaviour is the same when taking
+- * linear and when taking scatter.
+- */
+-int
+-abd_iterate_wfunc(abd_t *abd, size_t size, size_t off,
+-    abd_iter_wfunc_t *func, void *private)
+-{
+-	return (abd_iterate_func(abd, size, off,
+-	    func, private, ABD_ITER_WRITE));
+-}
+-
+ struct buf_arg {
+ 	void *arg_buf;
+ };
+ 
+ static int
+-abd_copy_to_buf_off_incremental(const void *buf, uint64_t size, void *private)
++abd_copy_to_buf_off_incremental(void *buf, uint64_t size, void *private)
+ {
+ 	struct buf_arg *arg = private;
+ 
+@@ -675,12 +575,12 @@ abd_copy_to_buf_off(void *buf, abd_t *abd, size_t size, size_t off)
+ {
+ 	struct buf_arg arg = { buf };
+ 
+-	(void) abd_iterate_rfunc(abd, size, off,
++	(void) abd_iterate_func(abd, size, off,
+ 	    abd_copy_to_buf_off_incremental, &arg);
+ }
+ 
+ static int
+-abd_cmp_buf_off_incremental(const void *buf, uint64_t size, void *private)
++abd_cmp_buf_off_incremental(void *buf, uint64_t size, void *private)
+ {
+ 	int ret;
+ 	struct buf_arg *arg = private;
+@@ -699,7 +599,7 @@ abd_cmp_buf_off(abd_t *abd, const void *buf, size_t size, size_t off)
+ {
+ 	struct buf_arg arg = { (void *) buf };
+ 
+-	return (abd_iterate_rfunc(abd, size, off,
++	return (abd_iterate_func(abd, size, off,
+ 	    abd_cmp_buf_off_incremental, &arg));
+ }
+ 
+@@ -723,7 +623,7 @@ abd_copy_from_buf_off(abd_t *abd, const void *buf, size_t size, size_t off)
+ 	struct buf_arg arg = { (void *) buf };
+ 
+ 	ASSERT(!(abd->abd_flags & ABD_FLAG_FROZEN));
+-	(void) abd_iterate_wfunc(abd, size, off,
++	(void) abd_iterate_func(abd, size, off,
+ 	    abd_copy_from_buf_off_incremental, &arg);
+ }
+ 
+@@ -740,7 +640,7 @@ void
+ abd_zero_off(abd_t *abd, size_t size, size_t off)
+ {
+ 	ASSERT(!(abd->abd_flags & ABD_FLAG_FROZEN));
+-	(void) abd_iterate_wfunc(abd, size, off,
++	(void) abd_iterate_func(abd, size, off,
+ 	    abd_zero_off_incremental, NULL);
+ }
+ 
+@@ -770,8 +670,8 @@ abd_iterate_func2(abd_t *dabd, abd_t *sabd,
+ 	ASSERT3U(doff + dsize, <=, dabd->abd_size);
+ 	ASSERT3U(soff + ssize, <=, sabd->abd_size);
+ 
+-	abd_iter_init2(&daiter, dabd, ABD_ITER_WRITE,
+-	    &saiter, sabd, ABD_ITER_WRITE);
++	abd_iter_init(&daiter, dabd);
++	abd_iter_init(&saiter, sabd);
+ 	abd_iter_advance(&daiter, doff);
+ 	abd_iter_advance(&saiter, soff);
+ 
+@@ -794,14 +694,14 @@ abd_iterate_func2(abd_t *dabd, abd_t *sabd,
+ 		ASSERT(dsize == dlen || (dlen & 15) == 0);
+ 		ASSERT(ssize == slen || (slen & 15) == 0);
+ 
+-		abd_iter_map_atomic(&daiter);
+-		abd_iter_map_atomic(&saiter);
++		abd_iter_map(&daiter);
++		abd_iter_map(&saiter);
+ 
+ 		ret = func(daiter.iter_mapaddr, saiter.iter_mapaddr, dlen, slen,
+ 		    private);
+ 
+-		abd_iter_unmap_atomic(&saiter);
+-		abd_iter_unmap_atomic(&daiter);
++		abd_iter_unmap(&saiter);
++		abd_iter_unmap(&daiter);
+ 
+ 		if (ret != 0)
+ 			break;
+@@ -871,27 +771,21 @@ abd_copy_to_user_off(void *buf, abd_t *abd, size_t size, size_t off)
+ 	abd_verify(abd);
+ 	ASSERT3U(off + size, <=, abd->abd_size);
+ 
+-	abd_iter_init(&aiter, abd, ABD_ITER_READ);
++	abd_iter_init(&aiter, abd);
+ 	abd_iter_advance(&aiter, off);
+ 
+ 	while (size > 0) {
+ 		len = MIN(aiter.iter_mapsize, size);
+ 		ASSERT3U(len, >, 0);
+ 
+-		abd_iter_map_atomic(&aiter);
++		abd_iter_map(&aiter);
+ 
+ 		ret = copyout(aiter.iter_mapaddr, buf, len);
+-#ifdef linux
+-		ret = __copy_to_user_inatomic(buf, aiter.iter_mapaddr, len);
+-#endif
+ 
+-		abd_iter_unmap_atomic(&aiter);
++		abd_iter_unmap(&aiter);
+ 		if (ret) {
+ 			abd_iter_map(&aiter);
+ 			ret = copyout(aiter.iter_mapaddr, buf, len);
+-#ifdef linux
+-			ret = copy_to_user(buf, aiter.iter_mapaddr, len);
+-#endif
+ 			abd_iter_unmap(&aiter);
+ 			if (ret)
+ 				break;
+@@ -919,27 +813,21 @@ abd_copy_from_user_off(abd_t *abd, const void *buf, size_t size, size_t off)
+ 	ASSERT3U(off + size, <=, abd->abd_size);
+ 	ASSERT(!(abd->abd_flags & ABD_FLAG_FROZEN));
+ 
+-	abd_iter_init(&aiter, abd, ABD_ITER_WRITE);
++	abd_iter_init(&aiter, abd);
+ 	abd_iter_advance(&aiter, off);
+ 
+ 	while (size > 0) {
+ 		len = MIN(aiter.iter_mapsize, size);
+ 		ASSERT3U(len, >, 0);
+ 
+-		abd_iter_map_atomic(&aiter);
++		abd_iter_map(&aiter);
+ 
+ 		ret = copyin(buf, aiter.iter_mapaddr, len);
+-#ifdef linux
+-		ret = __copy_from_user_inatomic(aiter.iter_mapaddr, buf, len);
+-#endif
+ 
+-		abd_iter_unmap_atomic(&aiter);
++		abd_iter_unmap(&aiter);
+ 		if (ret) {
+ 			abd_iter_map(&aiter);
+ 			ret = copyin(buf, aiter.iter_mapaddr, len);
+-#ifdef linux
+-			ret = copy_from_user(aiter.iter_mapaddr, buf, len);
+-#endif
+ 			abd_iter_unmap(&aiter);
+ 			if (ret)
+ 				break;
+@@ -1063,61 +951,4 @@ abd_uiocopy_off(abd_t *abd, size_t n, enum uio_rw rw, uio_t *uio,
+ 	}
+ 	return (0);
+ }
+-
+-#ifdef linux
+-/*
+- * bio_map for scatter ABD.
+- * @off is the offset in @abd
+- * You should use abd_bio_map_off, it will choose the right function according
+- * to the ABD type.
+- */
+-unsigned int
+-abd_scatter_bio_map_off(struct bio *bio, abd_t *abd, unsigned int bio_size,
+-    size_t off)
+-{
+-	int i;
+-	size_t len;
+-	struct abd_iter aiter;
+-
+-	abd_verify(abd);
+-	ASSERT(ABD_IS_SCATTER(abd));
+-	ASSERT3U(bio_size, <=, abd->abd_size - off);
+-
+-	abd_iter_init(&aiter, abd, ABD_ITER_READ);
+-	abd_iter_advance(&aiter, off);
+-
+-	for (i = 0; i < bio->bi_max_vecs; i++) {
+-		if (bio_size <= 0)
+-			break;
+-
+-		len = MIN(bio_size, aiter.iter_mapsize);
+-		ASSERT3U(len, >, 0);
+-
+-		if (bio_add_page(bio, sg_page(aiter.sg), len,
+-		    aiter.offset) != len)
+-			break;
+-
+-		bio_size -= len;
+-		abd_iter_advance(&aiter, len);
+-	}
+-	return (bio_size);
+-}
+-
+-/*
+- * bio_nr_pages for ABD.
+- * @off is the offset in @abd
+- */
+-unsigned long
+-abd_bio_nr_pages_off(abd_t *abd, unsigned int bio_size, size_t off)
+-{
+-	unsigned long pos;
+-	abd_verify(abd);
+-
+-	if (ABD_IS_LINEAR(abd))
+-		pos = (unsigned long)abd->abd_u.abd_linear.abd_buf + off;
+-	else
+-		pos = abd->abd_u.abd_scatter.abd_offset + off;
+-	return ((pos + bio_size + PAGESIZE-1)/PAGESIZE)-(pos/PAGESIZE);
+-}
+-#endif	/* linux */
+ #endif	/* _KERNEL */
+diff --git a/usr/src/uts/common/fs/zfs/edonr_zfs.c b/usr/src/uts/common/fs/zfs/edonr_zfs.c
+index ec57186..1756858 100644
+--- a/usr/src/uts/common/fs/zfs/edonr_zfs.c
++++ b/usr/src/uts/common/fs/zfs/edonr_zfs.c
+@@ -31,7 +31,7 @@
+ #define	EDONR_BLOCK_SIZE	EdonR512_BLOCK_SIZE
+ 
+ static int
+-edonr_incremental(const void *buf, uint64_t size, void *arg)
++edonr_incremental(void *buf, uint64_t size, void *arg)
+ {
+ 	EdonRState *ctx = arg;
+ 	EdonRUpdate(ctx, buf, size * 8);
+@@ -51,7 +51,7 @@ abd_checksum_edonr_native(abd_t *abd, uint64_t size,
+ 
+ 	ASSERT(ctx_template != NULL);
+ 	bcopy(ctx_template, &ctx, sizeof (ctx));
+-	(void) abd_iterate_rfunc(abd, size, 0, edonr_incremental, &ctx);
++	(void) abd_iterate_func(abd, size, 0, edonr_incremental, &ctx);
+ 	EdonRFinal(&ctx, digest);
+ 	bcopy(digest, zcp->zc_word, sizeof (zcp->zc_word));
+ }
+diff --git a/usr/src/uts/common/fs/zfs/sha256.c b/usr/src/uts/common/fs/zfs/sha256.c
+index dd5b0aa..de78422 100644
+--- a/usr/src/uts/common/fs/zfs/sha256.c
++++ b/usr/src/uts/common/fs/zfs/sha256.c
+@@ -31,7 +31,7 @@
+ #include <sys/abd.h>
+ 
+ static int
+-sha_incremental(const void *buf, uint64_t size, void *arg)
++sha_incremental(void *buf, uint64_t size, void *arg)
+ {
+ 	SHA2_CTX *ctx = arg;
+ 	SHA2Update(ctx, buf, size);
+@@ -47,7 +47,7 @@ abd_checksum_SHA256(abd_t *abd, uint64_t size,
+ 	zio_cksum_t tmp;
+ 
+ 	SHA2Init(SHA256, &ctx);
+-	(void) abd_iterate_rfunc(abd, size, 0, sha_incremental, &ctx);
++	(void) abd_iterate_func(abd, size, 0, sha_incremental, &ctx);
+ 	SHA2Final(&tmp, &ctx);
+ 
+ 	/*
+@@ -71,7 +71,7 @@ abd_checksum_SHA512_native(abd_t *abd, uint64_t size,
+ 	SHA2_CTX	ctx;
+ 
+ 	SHA2Init(SHA512_256, &ctx);
+-	(void) abd_iterate_rfunc(abd, size, 0, sha_incremental, &ctx);
++	(void) abd_iterate_func(abd, size, 0, sha_incremental, &ctx);
+ 	SHA2Final(zcp, &ctx);
+ }
+ 
+diff --git a/usr/src/uts/common/fs/zfs/skein_zfs.c b/usr/src/uts/common/fs/zfs/skein_zfs.c
+index 621ee60..d61a347 100644
+--- a/usr/src/uts/common/fs/zfs/skein_zfs.c
++++ b/usr/src/uts/common/fs/zfs/skein_zfs.c
+@@ -27,7 +27,7 @@
+ #include <sys/abd.h>
+ 
+ static int
+-skein_incremental(const void *buf, uint64_t size, void *arg)
++skein_incremental(void *buf, uint64_t size, void *arg)
+ {
+ 	Skein_512_Ctxt_t *ctx = arg;
+ 	Skein_512_Update(ctx, buf, size);
+@@ -48,7 +48,7 @@ abd_checksum_skein_native(abd_t *abd, uint64_t size,
+ 
+ 	ASSERT(ctx_template != NULL);
+ 	bcopy(ctx_template, &ctx, sizeof (ctx));
+-	(void) abd_iterate_rfunc(abd, size, 0, skein_incremental, &ctx);
++	(void) abd_iterate_func(abd, size, 0, skein_incremental, &ctx);
+ 	(void) Skein_512_Final(&ctx, (uint8_t *)zcp);
+ 	bzero(&ctx, sizeof (ctx));
+ }
+diff --git a/usr/src/uts/common/fs/zfs/sys/abd.h b/usr/src/uts/common/fs/zfs/sys/abd.h
+index aefbe85..4d5a157 100644
+--- a/usr/src/uts/common/fs/zfs/sys/abd.h
++++ b/usr/src/uts/common/fs/zfs/sys/abd.h
+@@ -65,8 +65,7 @@ typedef struct abd {
+ 	} abd_u;
+ } abd_t;
+ 
+-typedef int abd_iter_rfunc_t(const void *buf, uint64_t size, void *private);
+-typedef int abd_iter_wfunc_t(void *buf, uint64_t size, void *private);
++typedef int abd_iter_func_t(void *buf, uint64_t size, void *private);
+ typedef int abd_iter_func2_t(void *bufa, void *bufb,
+     uint64_t sizea, uint64_t sizeb, void *private);
+ 
+@@ -95,8 +94,7 @@ void abd_return_buf_copy(abd_t *, void *, size_t);
+ /*
+  * ABD operations
+  */
+-int abd_iterate_rfunc(abd_t *, size_t, size_t, abd_iter_rfunc_t *, void *);
+-int abd_iterate_wfunc(abd_t *, size_t, size_t, abd_iter_wfunc_t *, void *);
++int abd_iterate_func(abd_t *, size_t, size_t, abd_iter_func_t *, void *);
+ int abd_iterate_func2(abd_t *, abd_t *, size_t, size_t, size_t, size_t,
+     abd_iter_func2_t *, void *);
+ void abd_copy_off(abd_t *, abd_t *, size_t, size_t, size_t);
+@@ -114,23 +112,6 @@ int abd_copy_from_user_off(abd_t *, const void *, size_t, size_t);
+ int abd_uiomove_off(abd_t *, size_t, enum uio_rw, uio_t *, size_t);
+ int abd_uiocopy_off(abd_t *, size_t, enum uio_rw, uio_t *, size_t *,
+     size_t);
+-#ifdef linux
+-unsigned int abd_scatter_bio_map_off(struct bio *, abd_t *, unsigned int,
+-    size_t);
+-unsigned long abd_bio_nr_pages_off(abd_t *, unsigned int, size_t);
+-
+-#define	abd_bio_map_off(bio, abd, size, off)				\
+-(									\
+-{									\
+-	unsigned int ___ret;						\
+-	if (ABD_IS_LINEAR(abd))						\
+-		___ret = bio_map(bio, abd_to_buf(abd) + (off), size);	\
+-	else								\
+-		___ret = abd_scatter_bio_map_off(bio, abd, size, off);	\
+-	___ret;								\
+-}									\
+-)
+-#endif	/* linux */
+ #endif	/* _KERNEL */
+ 
+ /*
+diff --git a/usr/src/uts/common/fs/zfs/vdev_raidz.c b/usr/src/uts/common/fs/zfs/vdev_raidz.c
+index 838fd45..ebb1c77 100644
+--- a/usr/src/uts/common/fs/zfs/vdev_raidz.c
++++ b/usr/src/uts/common/fs/zfs/vdev_raidz.c
+@@ -615,7 +615,7 @@ struct pqr_struct {
+ };
+ 
+ static int
+-vdev_raidz_p_func(const void *buf, uint64_t size, void *private)
++vdev_raidz_p_func(void *buf, uint64_t size, void *private)
+ {
+ 	struct pqr_struct *pqr = private;
+ 	const uint64_t *src = buf;
+@@ -630,7 +630,7 @@ vdev_raidz_p_func(const void *buf, uint64_t size, void *private)
+ }
+ 
+ static int
+-vdev_raidz_pq_func(const void *buf, uint64_t size, void *private)
++vdev_raidz_pq_func(void *buf, uint64_t size, void *private)
+ {
+ 	struct pqr_struct *pqr = private;
+ 	const uint64_t *src = buf;
+@@ -649,7 +649,7 @@ vdev_raidz_pq_func(const void *buf, uint64_t size, void *private)
+ }
+ 
+ static int
+-vdev_raidz_pqr_func(const void *buf, uint64_t size, void *private)
++vdev_raidz_pqr_func(void *buf, uint64_t size, void *private)
+ {
+ 	struct pqr_struct *pqr = private;
+ 	const uint64_t *src = buf;
+@@ -684,7 +684,7 @@ vdev_raidz_generate_parity_p(raidz_map_t *rm)
+ 			abd_copy_to_buf(p, src, rm->rm_col[c].rc_size);
+ 		} else {
+ 			struct pqr_struct pqr = { p, NULL, NULL };
+-			(void) abd_iterate_rfunc(src, rm->rm_col[c].rc_size, 0,
++			(void) abd_iterate_func(src, rm->rm_col[c].rc_size, 0,
+ 			    vdev_raidz_p_func, &pqr);
+ 		}
+ 	}
+@@ -714,7 +714,7 @@ vdev_raidz_generate_parity_pq(raidz_map_t *rm)
+ 			(void) memcpy(q, p, rm->rm_col[c].rc_size);
+ 		} else {
+ 			struct pqr_struct pqr = { p, q, NULL };
+-			abd_iterate_rfunc(src, rm->rm_col[c].rc_size, 0,
++			abd_iterate_func(src, rm->rm_col[c].rc_size, 0,
+ 			    vdev_raidz_pq_func, &pqr);
+ 		}
+ 
+@@ -762,7 +762,7 @@ vdev_raidz_generate_parity_pqr(raidz_map_t *rm)
+ 			(void) memcpy(r, p, rm->rm_col[c].rc_size);
+ 		} else {
+ 			struct pqr_struct pqr = { p, q, r };
+-			abd_iterate_rfunc(src, rm->rm_col[c].rc_size, 0,
++			abd_iterate_func(src, rm->rm_col[c].rc_size, 0,
+ 			    vdev_raidz_pqr_func, &pqr);
+ 		}
+ 
+@@ -972,7 +972,7 @@ vdev_raidz_reconstruct_q(raidz_map_t *rm, int *tgts, int ntgts)
+ 	exp = 255 - (rm->rm_cols - 1 - x);
+ 
+ 	struct reconst_q_struct rq = { abd_to_buf(src), exp };
+-	(void) abd_iterate_wfunc(dst, rm->rm_col[x].rc_size, 0,
++	(void) abd_iterate_func(dst, rm->rm_col[x].rc_size, 0,
+ 	    vdev_raidz_reconst_q_post_func, &rq);
+ 
+ 	return (1 << VDEV_RAIDZ_Q);
+diff --git a/usr/src/uts/common/fs/zfs/zio_checksum.c b/usr/src/uts/common/fs/zfs/zio_checksum.c
+index 2009483..d76abd9 100644
+--- a/usr/src/uts/common/fs/zfs/zio_checksum.c
++++ b/usr/src/uts/common/fs/zfs/zio_checksum.c
+@@ -106,7 +106,7 @@ abd_fletcher_2_native(abd_t *abd, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) abd_iterate_rfunc(abd, size, 0,
++	(void) abd_iterate_func(abd, size, 0,
+ 	    fletcher_2_incremental_native, zcp);
+ }
+ 
+@@ -116,7 +116,7 @@ abd_fletcher_2_byteswap(abd_t *abd, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) abd_iterate_rfunc(abd, size, 0,
++	(void) abd_iterate_func(abd, size, 0,
+ 	    fletcher_2_incremental_byteswap, zcp);
+ }
+ 
+@@ -126,7 +126,7 @@ abd_fletcher_4_native(abd_t *abd, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) abd_iterate_rfunc(abd, size, 0,
++	(void) abd_iterate_func(abd, size, 0,
+ 	    fletcher_4_incremental_native, zcp);
+ }
+ 
+@@ -136,7 +136,7 @@ abd_fletcher_4_byteswap(abd_t *abd, uint64_t size,
+     const void *ctx_template, zio_cksum_t *zcp)
+ {
+ 	fletcher_init(zcp);
+-	(void) abd_iterate_rfunc(abd, size, 0,
++	(void) abd_iterate_func(abd, size, 0,
+ 	    fletcher_4_incremental_byteswap, zcp);
+ }
+ 
+-- 
+1.8.3.1
+
